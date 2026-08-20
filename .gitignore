@@ -1,0 +1,28 @@
+# Dependencies and build output
+**/node_modules/
+**/dist/
+**/coverage/
+**/.vite/
+**/playwright-report/
+**/test-results/
+
+# Local configuration and secrets
+**/.env
+**/.env.*
+!**/.env.example
+!config/examples/*.example
+deploy/env/*/stack.env
+scripts/local/
+
+# Runtime and diagnostic output
+*.log
+*.tmp
+*.bak
+*.old
+
+# Local assistant/tool state
+.codely/
+.codely-cli/
+
+# Deployment instructions with credentials
+前端项目部署指令.md

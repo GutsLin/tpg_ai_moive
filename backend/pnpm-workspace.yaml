@@ -1,0 +1,3 @@
+allowBuilds:
+  '@alicloud/openapi-core': true
+  msgpackr-extract: true

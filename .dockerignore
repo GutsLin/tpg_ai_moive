@@ -1,0 +1,16 @@
+# Docker build only needs application source, manifests, and Nginx configuration.
+**/node_modules/
+**/dist/
+**/coverage/
+**/playwright-report/
+**/test-results/
+tests/
+docs/
+scripts/
+config/
+.codely/
+.codely-cli/
+.git/
+.env
+.env.*
+*.log

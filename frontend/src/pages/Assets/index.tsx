@@ -1,0 +1,610 @@
+import {
+  AppstoreAddOutlined,
+  FolderOpenOutlined,
+  LoadingOutlined,
+  ReloadOutlined,
+  SearchOutlined,
+  SyncOutlined,
+} from '@ant-design/icons'
+import { Button, Checkbox, Empty, Input, Modal, Pagination, Select, Skeleton, Space, Tabs, Typography, message } from 'antd'
+import { useEffect, useMemo, useState } from 'react'
+
+import {
+  batchSyncAssets,
+  deleteAsset,
+  getAssets,
+  syncAssets,
+  type AssetItem,
+  type AssetStatus,
+  type AssetType,
+} from '../../api/assets'
+import { getAssetCategories, type AssetCategoryItem } from '../../api/asset-categories'
+import { getActiveVideoProvider } from '../../api/video-provider'
+import { useAuth } from '../../stores/auth'
+import { PageHeader } from '../../components/PageHeader'
+import { usePolling } from '../../hooks/usePolling'
+import { AssetCard } from './AssetCard'
+import { mergeAssetsForRefresh } from './asset-list-state'
+import { CategoryManagerModal } from './CategoryManagerModal'
+import { UploadModal } from './UploadModal'
+
+const filterCardStyle = {
+  borderRadius: 28,
+  background: 'linear-gradient(180deg, rgba(255,255,255,0.96) 0%, rgba(248,250,252,0.98) 100%)',
+  border: '1px solid #dbe4ea',
+  boxShadow: '0 24px 60px rgba(15, 23, 42, 0.05)',
+  padding: 24,
+}
+
+const loadingCardStyle = {
+  borderRadius: 28,
+  border: '1px solid #dbe4ea',
+  background: '#ffffff',
+  boxShadow: '0 20px 48px rgba(15, 23, 42, 0.04)',
+  padding: 18,
+}
+
+const DEFAULT_ASSET_PAGE = 1
+const DEFAULT_ASSET_PAGE_SIZE = 24
+
+export const AssetsPage = () => {
+  const { state } = useAuth()
+  const [assets, setAssets] = useState<AssetItem[]>([])
+  const [categories, setCategories] = useState<AssetCategoryItem[]>([])
+  const [loading, setLoading] = useState(true)
+  const [refreshing, setRefreshing] = useState(false)
+  const [syncing, setSyncing] = useState(false)
+  const [deletingId, setDeletingId] = useState<number | null>(null)
+  const [uploadOpen, setUploadOpen] = useState(false)
+  const [categoryModalOpen, setCategoryModalOpen] = useState(false)
+  const [keyword, setKeyword] = useState('')
+  const [draftKeyword, setDraftKeyword] = useState('')
+  const [uploader, setUploader] = useState('')
+  const [draftUploader, setDraftUploader] = useState('')
+  const [status, setStatus] = useState<'all' | AssetStatus>('all')
+  const [assetType, setAssetType] = useState<'all' | AssetType>('all')
+  const [categoryId, setCategoryId] = useState<'all' | number>('all')
+  const [assetPage, setAssetPage] = useState(DEFAULT_ASSET_PAGE)
+  const [assetPageSize, setAssetPageSize] = useState(DEFAULT_ASSET_PAGE_SIZE)
+  const [assetTotal, setAssetTotal] = useState(0)
+  const [messageApi, contextHolder] = message.useMessage()
+  const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set())
+  const [selectMode, setSelectMode] = useState(false)
+  const [batchSyncOpen, setBatchSyncOpen] = useState(false)
+  const [batchSyncing, setBatchSyncing] = useState(false)
+  const [activeProviderName, setActiveProviderName] = useState('')
+
+  const loadCategories = async () => {
+    try {
+      const result = await getAssetCategories()
+      setCategories(result.items)
+    } catch {
+      void messageApi.error('加载素材组失败')
+    }
+  }
+
+  const loadAssets = async (
+    options: {
+      silent?: boolean
+      categoryId?: 'all' | number
+      keyword?: string
+      uploader?: string
+      assetType?: 'all' | AssetType
+      status?: 'all' | AssetStatus
+      page?: number
+      pageSize?: number
+    } = {}
+  ) => {
+    if (options.silent) {
+      setRefreshing(true)
+    } else {
+      setLoading(true)
+    }
+
+    try {
+      const nextAssetType = options.assetType ?? assetType
+      const nextStatus = options.status ?? status
+      const nextCategoryId = options.categoryId ?? categoryId
+      const nextPage = options.page ?? assetPage
+      const nextPageSize = options.pageSize ?? assetPageSize
+      const result = await getAssets({
+        page: nextPage,
+        pageSize: nextPageSize,
+        keyword: options.keyword ?? keyword,
+        uploader: options.uploader ?? uploader,
+        assetType: nextAssetType === 'all' ? undefined : nextAssetType,
+        status: nextStatus === 'all' ? undefined : nextStatus,
+        categoryId: nextCategoryId === 'all' ? undefined : nextCategoryId,
+      })
+      if (!result || !Array.isArray(result.items)) {
+        throw new Error('素材列表响应无效')
+      }
+      setAssetTotal(result.total)
+      setAssets((current) => mergeAssetsForRefresh(current, result.items))
+    } catch {
+      void messageApi.error('加载素材失败')
+    } finally {
+      setLoading(false)
+      setRefreshing(false)
+    }
+  }
+
+  useEffect(() => {
+    void loadCategories()
+  }, [])
+
+  useEffect(() => {
+    void loadAssets()
+  }, [keyword, uploader, status, assetType, categoryId, assetPage, assetPageSize])
+
+  const hasPollingAssets = assets.some(
+    (item) => item.arkStatus === 'pending' || item.arkStatus === 'processing' || item.arkStatus === 'deleting'
+  )
+
+  usePolling(
+    async () => {
+      await Promise.all([loadAssets({ silent: true }), loadCategories()])
+    },
+    5_000,
+    hasPollingAssets
+  )
+
+  const categoryTabs = useMemo(
+    () => [
+      { key: 'all', label: `全部素材组${assetTotal > 0 ? ` (${assetTotal})` : ''}` },
+      ...categories.map((item) => ({
+        key: String(item.id),
+        label: `${item.name}${item.syncEnabled === false ? ' · 仅本地' : ' · 可同步'}${item.assetCount > 0 ? ` (${item.assetCount})` : ''}`,
+      })),
+    ],
+    [assetTotal, categories]
+  )
+
+  const metrics = useMemo(
+    () => [
+      {
+        label: '素材总数',
+        value: assetTotal,
+      },
+      {
+        label: '火山同步中',
+        value: assets.filter((item) => item.effectiveSync && (item.arkStatus === 'pending' || item.arkStatus === 'processing')).length,
+      },
+      {
+        label: '仅本地素材',
+        value: assets.filter((item) => !item.effectiveSync).length,
+      },
+    ],
+    [assetTotal, assets]
+  )
+
+  const resetAssetPage = () => {
+    setAssetPage(DEFAULT_ASSET_PAGE)
+  }
+
+  const handleDelete = (asset: AssetItem) => {
+    Modal.confirm({
+      title: '删除素材',
+      content: `确认删除「${asset.name}」？删除后将异步清理 OSS 与火山素材记录。`,
+      okText: '确认删除',
+      cancelText: '取消',
+      onOk: async () => {
+        setDeletingId(asset.id)
+        try {
+          await deleteAsset(asset.id)
+          void messageApi.success('删除任务已提交')
+          await Promise.all([loadAssets({ silent: true }), loadCategories()])
+        } catch (error: any) {
+          const statusCode = error?.response?.status
+          const backendMessage = error?.response?.data?.message
+          if (statusCode === 409) {
+            void messageApi.warning(backendMessage ?? '该素材已被视频任务引用，暂时无法删除')
+          } else {
+            void messageApi.error(backendMessage ?? '删除失败，请稍后重试')
+          }
+        } finally {
+          setDeletingId(null)
+        }
+      },
+    })
+  }
+
+  const handleManualSync = async () => {
+    setSyncing(true)
+    try {
+      const result = await syncAssets()
+      void messageApi.success(`已补推 ${result.count} 个素材任务`)
+      await Promise.all([loadAssets({ silent: true }), loadCategories()])
+    } finally {
+      setSyncing(false)
+    }
+  }
+
+  const toggleSelect = (asset: AssetItem, checked: boolean) => {
+    setSelectedIds((prev) => {
+      const next = new Set(prev)
+      if (checked) { next.add(asset.id) } else { next.delete(asset.id) }
+      return next
+    })
+  }
+
+  // 判断素材是否已在当前平台同步成功（不可重复同步）
+  const isAssetAlreadySynced = (asset: AssetItem): boolean => {
+    return asset.arkStatus === 'active' && Boolean(asset.arkAssetId)
+  }
+
+  const selectableAssets = useMemo(
+    () => selectMode ? assets.filter((a) => !isAssetAlreadySynced(a)) : [],
+    [selectMode, assets]
+  )
+
+  const toggleSelectAll = (checked: boolean) => {
+    setSelectedIds(checked ? new Set(selectableAssets.map((a) => a.id)) : new Set())
+  }
+
+  const exitSelectMode = () => {
+    setSelectMode(false)
+    setSelectedIds(new Set())
+  }
+
+  const handleBatchSync = async () => {
+    setBatchSyncing(true)
+    try {
+      const result = await batchSyncAssets([...selectedIds])
+      void messageApi.success(`已提交 ${result.count} 个素材到素材库同步队列`)
+      setBatchSyncOpen(false)
+      exitSelectMode()
+      await Promise.all([loadAssets({ silent: true }), loadCategories()])
+    } catch {
+      void messageApi.error('批量同步提交失败')
+    } finally {
+      setBatchSyncing(false)
+    }
+  }
+
+  const openBatchSync = async () => {
+    try {
+      const provider = await getActiveVideoProvider()
+      setActiveProviderName(provider.name)
+    } catch {
+      setActiveProviderName('当前默认平台')
+    }
+    setBatchSyncOpen(true)
+  }
+
+  const isAdmin = state.user?.role === 'admin'
+  const canUpload = state.activeProjectRole === 'manager' || state.activeProjectRole === 'member'
+  const canDelete = state.activeProjectRole === 'manager'
+  const canBatchSync = isAdmin || state.activeProjectRole === 'manager'
+
+  return (
+    <>
+      {contextHolder}
+      <Space orientation="vertical" size={20} style={{ width: '100%' }}>
+        <PageHeader
+          title="素材管理"
+          description="当前列表严格限定在当前项目工作区。上传素材后会按素材组与素材级同步策略，自动走火山或 OSS 双通道。"
+          actions={
+            <Space wrap size={12}>
+              {canBatchSync ? (
+                <Button
+                  aria-label="批量同步"
+                  icon={<SyncOutlined />}
+                  type={selectMode ? 'primary' : 'default'}
+                  onClick={() => (selectMode ? exitSelectMode() : setSelectMode(true))}
+                >
+                  {selectMode ? '退出选择' : '批量同步'}
+                </Button>
+              ) : null}
+              {isAdmin ? (
+                <Button aria-label="素材组管理" icon={<FolderOpenOutlined />} onClick={() => setCategoryModalOpen(true)}>
+                  素材组管理
+                </Button>
+              ) : null}
+              {isAdmin ? (
+                <Button aria-label="手动补推" icon={<SyncOutlined />} onClick={() => void handleManualSync()} loading={syncing}>
+                  手动补推
+                </Button>
+              ) : null}
+              <Button
+                aria-label="上传素材"
+                type="primary"
+                icon={<AppstoreAddOutlined />}
+                disabled={!canUpload}
+                onClick={() => {
+                  if (canUpload) {
+                    setUploadOpen(true)
+                  }
+                }}
+              >
+                上传素材
+              </Button>
+            </Space>
+          }
+        />
+        {!canUpload ? (
+          <Typography.Text type="secondary">当前项目角色为只读，不能上传素材、编辑素材或创建任务。</Typography.Text>
+        ) : null}
+
+        <section style={filterCardStyle}>
+          <Space orientation="vertical" size={18} style={{ width: '100%' }}>
+            <div
+              style={{
+                display: 'grid',
+                gridTemplateColumns: 'repeat(auto-fit, minmax(160px, 1fr))',
+                gap: 12,
+              }}
+            >
+              {metrics.map((item) => (
+                <div
+                  key={item.label}
+                  style={{
+                    borderRadius: 22,
+                    padding: '16px 18px',
+                    background: '#f8fafc',
+                    border: '1px solid #e2e8f0',
+                  }}
+                >
+                  <Typography.Text type="secondary">{item.label}</Typography.Text>
+                  <Typography.Title level={4} style={{ margin: '10px 0 0' }}>
+                    {item.value}
+                  </Typography.Title>
+                </div>
+              ))}
+            </div>
+
+            <Tabs
+              activeKey={String(categoryId)}
+              items={categoryTabs}
+              onChange={(key) => {
+                resetAssetPage()
+                setCategoryId(key === 'all' ? 'all' : Number(key))
+              }}
+            />
+
+            <Space size={12} wrap style={{ width: '100%' }}>
+              <Input
+                value={draftKeyword}
+                placeholder="搜索名称或标签"
+                prefix={<SearchOutlined />}
+                allowClear
+                size="large"
+                style={{ width: 260 }}
+                onChange={(event) => setDraftKeyword(event.target.value)}
+                onPressEnter={() => {
+                  resetAssetPage()
+                  setKeyword(draftKeyword.trim())
+                }}
+              />
+              <Button
+                icon={<ReloadOutlined />}
+                onClick={() => {
+                  resetAssetPage()
+                  setKeyword(draftKeyword.trim())
+                }}
+              >
+                应用搜索
+              </Button>
+              <Input
+                value={draftUploader}
+                placeholder="按上传人筛选"
+                allowClear
+                size="large"
+                style={{ width: 220 }}
+                onChange={(event) => setDraftUploader(event.target.value)}
+                onPressEnter={() => {
+                  resetAssetPage()
+                  setUploader(draftUploader.trim())
+                }}
+              />
+              <Button
+                onClick={() => {
+                  resetAssetPage()
+                  setUploader(draftUploader.trim())
+                }}
+              >
+                按上传人筛选
+              </Button>
+              <Select
+                value={assetType}
+                size="large"
+                style={{ width: 160 }}
+                onChange={(value) => {
+                  resetAssetPage()
+                  setAssetType(value)
+                }}
+                options={[
+                  { label: '全部类型', value: 'all' },
+                  { label: '图片', value: 'Image' },
+                  { label: '视频', value: 'Video' },
+                  { label: '音频', value: 'Audio' },
+                ]}
+              />
+              <Select
+                value={status}
+                size="large"
+                style={{ width: 160 }}
+                onChange={(value) => {
+                  resetAssetPage()
+                  setStatus(value)
+                }}
+                options={[
+                  { label: '全部状态', value: 'all' },
+                  { label: '待审核', value: 'pending' },
+                  { label: '审核中', value: 'processing' },
+                  { label: '已通过', value: 'active' },
+                  { label: '失败', value: 'failed' },
+                ]}
+              />
+              {refreshing ? (
+                <Typography.Text type="secondary" style={{ display: 'inline-flex', alignItems: 'center', gap: 8 }}>
+                  <LoadingOutlined />
+                  正在同步审核状态
+                </Typography.Text>
+              ) : null}
+            </Space>
+          </Space>
+        </section>
+
+        {selectMode && assets.length > 0 ? (
+          <section style={{ ...filterCardStyle, padding: '12px 24px' }}>
+            <Space size={16} style={{ width: '100%', justifyContent: 'space-between' }}>
+              <Checkbox
+                checked={selectableAssets.length > 0 && selectedIds.size === selectableAssets.length}
+                indeterminate={selectedIds.size > 0 && selectedIds.size < selectableAssets.length}
+                disabled={selectableAssets.length === 0}
+                onChange={(e) => toggleSelectAll(e.target.checked)}
+              >
+                全选可同步素材
+              </Checkbox>
+              <Typography.Text type="secondary">
+                已选 {selectedIds.size} 个素材 · 不可选 {assets.length - selectableAssets.length} 个（已同步）
+              </Typography.Text>
+              <Button
+                type="primary"
+                icon={<SyncOutlined />}
+                disabled={selectedIds.size === 0}
+                onClick={() => void openBatchSync()}
+              >
+                同步选中素材
+              </Button>
+            </Space>
+          </section>
+        ) : null}
+
+        {loading ? (
+          <section
+            aria-label="素材加载中"
+            style={{
+              display: 'grid',
+              gridTemplateColumns: 'repeat(auto-fill, minmax(280px, 1fr))',
+              gap: 16,
+            }}
+          >
+            {Array.from({ length: 6 }).map((_, index) => (
+              <div key={index} style={loadingCardStyle}>
+                <Skeleton.Image active style={{ width: '100%', height: 220, borderRadius: 20 }} />
+                <Skeleton active paragraph={{ rows: 3 }} title={{ width: '58%' }} style={{ marginTop: 16 }} />
+              </div>
+            ))}
+          </section>
+        ) : assets.length === 0 ? (
+          <section
+            style={{
+              ...filterCardStyle,
+              minHeight: 320,
+              display: 'grid',
+              placeItems: 'center',
+            }}
+          >
+            <Empty
+              image={Empty.PRESENTED_IMAGE_SIMPLE}
+              description="当前还没有素材"
+            >
+              <Button
+                type="primary"
+                disabled={!canUpload}
+                onClick={() => {
+                  if (canUpload) {
+                    setUploadOpen(true)
+                  }
+                }}
+              >
+                立即上传
+              </Button>
+            </Empty>
+          </section>
+        ) : (
+          <section
+            style={{
+              display: 'grid',
+              gridTemplateColumns: 'repeat(auto-fill, minmax(280px, 1fr))',
+              gap: 16,
+            }}
+          >
+            {assets.map((asset) => (
+              <AssetCard
+                key={asset.id}
+                asset={asset}
+                categories={categories}
+                deleting={deletingId === asset.id}
+                readonly={!canDelete}
+                onDelete={handleDelete}
+                selectable={selectMode}
+                selected={selectedIds.has(asset.id)}
+                selectDisabled={selectMode && isAssetAlreadySynced(asset)}
+                onSelect={toggleSelect}
+              />
+            ))}
+          </section>
+        )}
+        {assetTotal > assetPageSize ? (
+          <Pagination
+            align="center"
+            current={assetPage}
+            pageSize={assetPageSize}
+            total={assetTotal}
+            showSizeChanger={false}
+            onChange={(page, pageSize) => {
+              setAssetPage(page)
+              setAssetPageSize(pageSize)
+            }}
+          />
+        ) : null}
+      </Space>
+
+      <UploadModal
+        open={uploadOpen}
+        categories={categories}
+        onCancel={() => setUploadOpen(false)}
+        onUploaded={async (asset) => {
+          const nextCategoryId = asset.categoryId ?? 'all'
+          const shouldReloadByCategoryEffect = nextCategoryId !== categoryId
+          setAssetPage(DEFAULT_ASSET_PAGE)
+          setCategoryId(nextCategoryId)
+          await loadCategories()
+          if (!shouldReloadByCategoryEffect) {
+            await loadAssets({ silent: true, categoryId: nextCategoryId, page: DEFAULT_ASSET_PAGE })
+          }
+        }}
+      />
+
+      <CategoryManagerModal
+        open={categoryModalOpen}
+        categories={categories}
+        onClose={() => setCategoryModalOpen(false)}
+        onChanged={async () => {
+          await Promise.all([loadCategories(), loadAssets({ silent: true })])
+        }}
+      />
+
+      <Modal
+        title="批量同步素材到素材库"
+        open={batchSyncOpen}
+        onCancel={() => setBatchSyncOpen(false)}
+        onOk={() => void handleBatchSync()}
+        confirmLoading={batchSyncing}
+        okText={`确认同步 ${selectedIds.size} 个素材`}
+        okButtonProps={{ disabled: selectedIds.size === 0 }}
+      >
+        <Space direction="vertical" size={12} style={{ width: '100%' }}>
+          <Typography.Text>
+            将对选中的 <strong>{selectedIds.size}</strong> 个素材执行以下操作：
+          </Typography.Text>
+          <Typography.Text type="secondary">
+            1. 清除原有素材库关联（ark_asset_id / ark_group_id）
+          </Typography.Text>
+          <Typography.Text type="secondary">
+            2. 重置为待同步状态并加入同步队列
+          </Typography.Text>
+          <Typography.Text type="secondary">
+            3. Worker 将自动提交到当前默认平台「{activeProviderName}」素材库审核
+          </Typography.Text>
+          <Typography.Text type="warning" style={{ fontSize: 12 }}>
+            ⚠ 同步后的素材需等待平台审核通过才能用于视频生成的 asset:// 引用。审核期间仍走 OSS 签名 URL，不影响使用。
+          </Typography.Text>
+        </Space>
+      </Modal>
+    </>
+  )
+}
