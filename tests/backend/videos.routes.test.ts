@@ -27,6 +27,9 @@ class FakeVideoRepository implements VideoRepository {
   public readonly updates: Array<{ id: number; patch: Partial<VideoRecord> }> = []
   public readonly exportCalls: VideoExportQueryParams[] = []
 
+  public async claimDownload(): Promise<string | null> { return null }
+  public async updateDownloadState(): Promise<VideoRecord | null> { return null }
+
   public seed(records: Array<Omit<VideoRecord, 'nextPollAt' | 'lastArkStatus' | 'lastArkStatusChangedAt' | 'lastPolledAt'> & Partial<Pick<VideoRecord, 'nextPollAt' | 'lastArkStatus' | 'lastArkStatusChangedAt' | 'lastPolledAt'>>>) {
     this.records = new Map(records.map((item) => [
       item.id,
@@ -333,14 +336,23 @@ class FakeVideoRepository implements VideoRepository {
 
 class FakeVideoDispatcher implements VideoDispatcher {
   public readonly createIds: number[] = []
-  public readonly syncCalls: Array<{ taskId: number; delayMs?: number }> = []
+  public readonly syncCalls: Array<{ taskId: number; delayMs?: number; runAt?: Date }> = []
+  public readonly downloadIds: number[] = []
 
   public async enqueueCreate(taskId: number): Promise<void> {
     this.createIds.push(taskId)
   }
 
-  public async enqueueSync(taskId: number, options?: { delayMs?: number }): Promise<void> {
-    this.syncCalls.push({ taskId, delayMs: options?.delayMs })
+  public async enqueueSync(taskId: number, options?: { delayMs?: number; runAt?: Date }): Promise<void> {
+    this.syncCalls.push({
+      taskId,
+      ...(options?.delayMs === undefined ? {} : { delayMs: options.delayMs }),
+      ...(options?.runAt === undefined ? {} : { runAt: options.runAt }),
+    })
+  }
+
+  public async enqueueDownload(taskId: number): Promise<void> {
+    this.downloadIds.push(taskId)
   }
 }
 
@@ -853,7 +865,7 @@ describe('/api/videos', () => {
     })
   })
 
-  it('重新拉取任务状态接口会将任务排到下一轮后台轮询且不直接入同步队列', async () => {
+  it('重新拉取任务状态接口会创建确定执行时间的后台轮询任务', async () => {
     await repository.update(2, {
       status: 'failed',
       errorMessage: '火山视频链接已过期',
@@ -888,7 +900,12 @@ describe('/api/videos', () => {
         nextPollAt: expect.any(Date),
       },
     })
-    expect(dispatcher.syncCalls).toEqual([])
+    expect(dispatcher.syncCalls).toEqual([
+      { taskId: 2, runAt: expect.any(Date) },
+    ])
+    expect(dispatcher.syncCalls[0]?.runAt?.getTime()).toBe(
+      repository.updates.at(-1)?.patch.nextPollAt?.getTime()
+    )
   })
 
   it('已有 OSS 视频的任务重新拉取状态时不会被打回生成中', async () => {

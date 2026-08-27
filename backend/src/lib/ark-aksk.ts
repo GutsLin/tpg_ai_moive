@@ -6,6 +6,8 @@ const ARK_SERVICE = 'ark'
 const ARK_REGION = 'cn-beijing'
 const ARK_VERSION = '2024-01-01'
 const ARK_HOST = 'open.volcengineapi.com'
+// 平台 API 单次请求超时，防止接口挂起拖死调用方
+const ARK_API_TIMEOUT_MS = 60_000
 
 export interface ArkAssetInfo {
   id: string
@@ -310,6 +312,8 @@ export class ArkAkskClient implements ArkAssetClient {
         Authorization: `HMAC-SHA256 Credential=${accessKey}/${credentialScope}, SignedHeaders=${signedHeaders}, Signature=${signature}`,
       },
       body: payload,
+      // 防止平台接口挂起拖死调用方（与 ark-bearer/toapis-avatar 同策略）
+      signal: AbortSignal.timeout(ARK_API_TIMEOUT_MS),
     })
 
     const json = (await response.json().catch(() => null)) as ArkOpenApiResponse<T> | null

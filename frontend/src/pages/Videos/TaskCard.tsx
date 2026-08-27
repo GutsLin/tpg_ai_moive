@@ -38,6 +38,16 @@ const buildStatusDescription = (task: VideoTaskItem) => {
     return [ `${providerLabel}队列排队中`, elapsedText, estimateText ].filter(Boolean).join('，')
   }
 
+  // processing 子状态：根据上游状态区分"生成中"与"下载/上传中"
+  const arkStatus = task.lastArkStatus?.toLowerCase()
+  if (arkStatus === 'completed') {
+    return [ `${providerLabel}已完成生成，正在下载并上传视频`, elapsedText ].filter(Boolean).join('，')
+  }
+
+  if (arkStatus === 'in_progress' || arkStatus === 'processing' || arkStatus === 'running' || arkStatus === 'queued') {
+    return [ `${providerLabel}正在生成视频`, elapsedText, estimateText ].filter(Boolean).join('，')
+  }
+
   if (task.nextPollAt) {
     return [ `已加入状态拉取队列，等待后台查询${providerLabel}状态`, elapsedText, estimateText ].filter(Boolean).join('，')
   }
@@ -45,39 +55,50 @@ const buildStatusDescription = (task: VideoTaskItem) => {
   return [ `${providerLabel}开始生成`, elapsedText, estimateText ].filter(Boolean).join('，')
 }
 
-const statusMeta: Record<
+const resolveProcessingLabel = (task: VideoTaskItem): string => {
+  const arkStatus = task.lastArkStatus?.toLowerCase()
+  if (arkStatus === 'completed') {
+    return '下载中'
+  }
+  if (arkStatus === 'in_progress' || arkStatus === 'processing' || arkStatus === 'running' || arkStatus === 'queued') {
+    return '生成中'
+  }
+  return '生成中'
+}
+
+const buildStatusMeta = (task: VideoTaskItem): Record<
   VideoTaskItem['status'],
   { label: string; color: string; background: string; border: string; icon: React.ReactNode }
-> = {
-  pending: {
-    label: '排队中',
-    color: '#2563eb',
-    background: '#eff6ff',
-    border: '#bfdbfe',
-    icon: <ClockCircleFilled />,
-  },
-  processing: {
-    label: '生成中',
-    color: '#2563eb',
-    background: '#eff6ff',
-    border: '#bfdbfe',
-    icon: <LoadingOutlined spin />,
-  },
-  succeeded: {
-    label: '已完成',
-    color: '#15803d',
-    background: '#f0fdf4',
-    border: '#bbf7d0',
-    icon: <CheckCircleFilled />,
-  },
-  failed: {
-    label: '失败',
-    color: '#dc2626',
-    background: '#fef2f2',
-    border: '#fecaca',
-    icon: <WarningFilled />,
-  },
-}
+> => ({
+    pending: {
+      label: '排队中',
+      color: '#2563eb',
+      background: '#eff6ff',
+      border: '#bfdbfe',
+      icon: <ClockCircleFilled />,
+    },
+    processing: {
+      label: resolveProcessingLabel(task),
+      color: '#2563eb',
+      background: '#eff6ff',
+      border: '#bfdbfe',
+      icon: <LoadingOutlined spin />,
+    },
+    succeeded: {
+      label: '已完成',
+      color: '#15803d',
+      background: '#f0fdf4',
+      border: '#bbf7d0',
+      icon: <CheckCircleFilled />,
+    },
+    failed: {
+      label: '失败',
+      color: '#dc2626',
+      background: '#fef2f2',
+      border: '#fecaca',
+      icon: <WarningFilled />,
+    },
+  })
 
 export const TaskCard = ({
   task,
@@ -92,7 +113,7 @@ export const TaskCard = ({
   replaying?: boolean
   syncing?: boolean
 }) => {
-  const status = statusMeta[task.status]
+  const status = buildStatusMeta(task)[task.status]
   const statusDescription = buildStatusDescription(task)
   const fullPrompt = task.promptRaw || task.prompt
   const modeLabel = task.mode === 'frames' ? '首尾帧' : task.mode === 'omni' ? '全能参考' : null

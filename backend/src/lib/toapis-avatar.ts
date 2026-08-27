@@ -4,6 +4,8 @@ import { VideoProviderService } from '../services/video-provider.service'
 
 const PRIVATE_AVATAR_BASE = '/videos/doubao-seedance-2-0/private-avatar'
 const TOAPIS_GROUP_ID_PATTERN = /^pg_[A-Za-z0-9]+$/
+// 素材库接口单次请求超时，防止接口挂起拖死 worker
+const TOAPIS_ASSET_API_TIMEOUT_MS = 60_000
 
 interface ToApisAvatarClientOptions {
   fetchImpl?: typeof fetch
@@ -177,6 +179,8 @@ export class ToApisAvatarClient implements ArkAssetClient {
         ...(body !== undefined ? { 'Content-Type': 'application/json' } : {}),
       },
       ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
+      // 防止平台接口挂起拖死 worker（与 ark-bearer 同策略）
+      signal: AbortSignal.timeout(TOAPIS_ASSET_API_TIMEOUT_MS),
     })
 
     const json: any = await response.json().catch(() => null)

@@ -116,6 +116,11 @@ export interface VideoProviderModelCapability {
     generateAudio: boolean
     outputFormat?: boolean
   }
+  referenceLimits?: {
+    image: number
+    video: number
+    audio: number
+  }
 }
 
 export interface ActiveVideoProvider {
@@ -123,6 +128,11 @@ export interface ActiveVideoProvider {
   name: string
   providerType: 'toapis' | 'volcano_ark'
   capabilities: { version: number; models: VideoProviderModelCapability[] }
+  referenceLimits?: {
+    image: number
+    video: number
+    audio: number
+  }
 }
 
 export interface VideoAnalyticsOverview {

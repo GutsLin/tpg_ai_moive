@@ -1,5 +1,6 @@
 import 'dotenv/config'
 
+import { PassThrough, Readable } from 'node:stream'
 import IORedis from 'ioredis'
 import { Queue, Worker, type Job } from 'bullmq'
 
@@ -36,6 +37,7 @@ import { classifyWorkerError, createWorkerLogger } from './worker-runtime'
 
 export const VIDEO_CREATE_QUEUE_NAME = 'create-and-sync-video'
 export const VIDEO_SYNC_QUEUE_NAME = 'sync-video-status'
+export const VIDEO_DOWNLOAD_QUEUE_NAME = 'download-video'
 
 export interface VideoWorkerJob {
   taskId: number
@@ -55,12 +57,34 @@ interface VideoCreateProcessorDeps {
 interface VideoSyncProcessorDeps {
   repository: VideoRepository
   dispatcher: VideoDispatcher
-  ossService: OssServiceContract
   arkClient: ArkVideoClient
   resolveClient?: (task: VideoRecord) => Promise<ArkVideoClient>
   generationLogger?: VideoGenerationLogger
-  fetchImpl?: typeof fetch
   batchSize?: number
+  now?: () => Date
+}
+
+interface VideoSyncEnqueuerDeps {
+  repository: VideoRepository
+  dispatcher: VideoDispatcher
+  batchSize?: number
+  now?: () => Date
+}
+
+interface VideoSyncTaskProcessorDeps {
+  repository: VideoRepository
+  dispatcher: VideoDispatcher
+  arkClient: ArkVideoClient
+  resolveClient?: (task: VideoRecord) => Promise<ArkVideoClient>
+  generationLogger?: VideoGenerationLogger
+  now?: () => Date
+}
+
+interface VideoDownloadProcessorDeps {
+  repository: VideoRepository
+  ossService: OssServiceContract
+  fetchImpl?: typeof fetch
+  generationLogger?: VideoGenerationLogger
   now?: () => Date
 }
 
@@ -86,14 +110,116 @@ const resolveVideoOssKey = (record: VideoRecord) => record.videoOssKey ?? `video
 const ASSET_URL_PREFIX = 'asset://'
 const FIRST_SYNC_POLL_DELAY_MS = 5 * 60_000
 const TOAPIS_FIRST_SYNC_POLL_DELAY_MS = 10_000
-const DEFAULT_SYNC_POLL_INTERVAL_MS = 30_000
-const DEFAULT_SYNC_BATCH_SIZE = 20
+export const VIDEO_SYNC_POLL_INTERVAL_MS = 30_000
+export const VIDEO_SYNC_SCAN_INTERVAL_MS = 5_000
+const DEFAULT_DOWNLOAD_POLL_INTERVAL_MS = 30_000
+export const VIDEO_SYNC_SCAN_BATCH_SIZE = 20
+const VIDEO_SYNC_CONCURRENCY = 5
+const VIDEO_DOWNLOAD_CONCURRENCY = 3
+const SYNC_ENQUEUE_TIMEOUT_MS = 30_000
 const ARK_STATUS_STALE_TIMEOUT_MS = 24 * 60 * 60 * 1000
 const DEFAULT_RECONCILE_INTERVAL_MS = 60_000
 const DEFAULT_RECONCILE_STALE_AFTER_MS = 10 * 60_000
 const DEFAULT_RECONCILE_BATCH_SIZE = 20
+// 下载使用流式传输；整体超时限制最长下载时间，空闲超时只限制长时间无数据的连接。
+const VIDEO_DOWNLOAD_CONNECT_TIMEOUT_MS = 30_000
+const VIDEO_DOWNLOAD_TOTAL_TIMEOUT_MS = 15 * 60_000
+const VIDEO_DOWNLOAD_IDLE_TIMEOUT_MS = 2 * 60_000
+export const resolveVideoSyncJobId = (taskId: number, runAtMs: number) =>
+  `video-sync-${taskId}-${Math.trunc(runAtMs)}`
+
 const getProviderLabel = (task: VideoRecord) =>
   task.providerSnapshot?.providerType === 'toapis' ? 'ToAPIs' : '火山方舟'
+
+// ToAPIs 结果文件可能签发在 files.toapis.com / files.toapis.cn 独立文件域名上。
+// 国内 ECS 直连 files.toapis.cn 的速度明显优于 API 同域代理，因此下载时优先直连，
+// 只有直连发生可恢复的 HTTP/链路错误时才切换到 /__files/ 备用路径。
+const TOAPIS_FILE_HOSTS = new Set(['files.toapis.com', 'files.toapis.cn'])
+
+const resolveToapisDirectUrl = (videoUrl: string): string | null => {
+  try {
+    const parsed = new URL(videoUrl)
+    const hostname = parsed.hostname.toLowerCase()
+    if (!TOAPIS_FILE_HOSTS.has(hostname)) {
+      return null
+    }
+
+    if (hostname === 'files.toapis.cn') {
+      return videoUrl
+    }
+
+    // .com 在国内可能被 DNS 污染，统一使用同路径的 .cn 文件域名直连。
+    parsed.hostname = 'files.toapis.cn'
+    return parsed.toString()
+  } catch {
+    return null
+  }
+}
+
+const resolveToapisProxyUrl = (videoUrl: string, task: VideoRecord): string | null => {
+  try {
+    const endpointOrigin = new URL(task.providerSnapshot?.endpoint ?? '').origin
+    const parsed = new URL(videoUrl)
+    if (!TOAPIS_FILE_HOSTS.has(parsed.hostname.toLowerCase()) || !endpointOrigin || endpointOrigin === 'null') {
+      return null
+    }
+
+    return `${endpointOrigin}/__files/${parsed.pathname.replace(/^\/+/, '')}${parsed.search}`
+  } catch {
+    return null
+  }
+}
+
+const resolveDownloadUrls = (videoUrl: string, task: VideoRecord): string[] => {
+  const directUrl = resolveToapisDirectUrl(videoUrl)
+  if (!directUrl) {
+    return [videoUrl]
+  }
+
+  const urls = [directUrl]
+  const proxyUrl = resolveToapisProxyUrl(videoUrl, task)
+  if (proxyUrl && !urls.includes(proxyUrl)) {
+    urls.push(proxyUrl)
+  }
+  return urls
+}
+
+const isRecoverableDownloadStatus = (status: number) =>
+  status === 408 || status === 425 || status === 429 || status === 478 || status >= 500
+
+const isRecoverableDownloadError = (error: unknown) => {
+  if (!(error instanceof Error)) {
+    return true
+  }
+
+  // URL/协议配置错误不会因切换域名而恢复，其他连接中断、超时和 socket 错误可以尝试备用地址。
+  return !/invalid url|unsupported protocol|only absolute urls|failed to parse url/i.test(error.message)
+}
+
+const writeDownloadFallbackLog = async (
+  task: VideoRecord,
+  generationLogger: VideoGenerationLogger,
+  fromUrl: string,
+  toUrl: string,
+  reason: { status?: number; error?: unknown }
+) => {
+  const errorMessage = reason.error instanceof Error ? reason.error.message : reason.error ? String(reason.error) : null
+
+  await generationLogger.write({
+    ...toLogContext(task),
+    stage: 'download',
+    action: 'video_result.download_fallback',
+    status: 'info',
+    message: '直连结果视频下载失败，切换到 ToAPIs 备用下载路径',
+    requestPayload: {
+      fromUrl,
+      toUrl,
+      arkTaskId: task.arkTaskId,
+      ...(reason.status === undefined ? {} : { status: reason.status }),
+    },
+    errorMessage,
+  })
+}
 
 const buildArkStatusStaleTimeoutMessage = (task: VideoRecord) =>
   `${getProviderLabel(task)}任务超过 24 小时无状态更新，已默认失败`
@@ -141,6 +267,29 @@ const updateVideoTask = async (
       responsePayload: summarizeVideoRecord,
     },
     async () => repository.update(task.id, patch)
+  )
+
+const updateDownloadState = async (
+  task: VideoRecord,
+  repository: VideoRepository,
+  generationLogger: VideoGenerationLogger,
+  claimToken: string,
+  action: string,
+  message: string,
+  patch: Partial<VideoRecord>
+) =>
+  generationLogger.step(
+    {
+      ...toLogContext(task),
+      stage: 'state_update',
+      action,
+      message,
+      requestPayload: { patch },
+      responsePayload: summarizeVideoRecord,
+      resultStatus: (record) => record ? 'succeeded' : 'failed',
+      resultErrorMessage: (record) => record ? null : '下载租约已失效，状态更新已跳过',
+    },
+    async () => repository.updateDownloadState(task.id, claimToken, patch)
   )
 
 const mapArkStatusToVideoStatus = (status: string): VideoStatus => {
@@ -277,7 +426,7 @@ const resolveVideoRequestSnapshot = async (
   }
 }
 
-const resolveNextPollAt = (now: Date) => new Date(now.getTime() + DEFAULT_SYNC_POLL_INTERVAL_MS)
+const resolveNextPollAt = (now: Date) => new Date(now.getTime() + VIDEO_SYNC_POLL_INTERVAL_MS)
 
 const resolveLastStatusChangedAt = (task: VideoRecord) =>
   task.lastArkStatusChangedAt ?? task.lastPolledAt ?? task.updatedAt ?? task.createdAt
@@ -291,6 +440,7 @@ const resolveArkStatusChangedAtPatch = (task: VideoRecord, arkStatus: string, no
 const handleMissingArkTask = async (
   task: VideoRecord,
   repository: VideoRepository,
+  dispatcher: VideoDispatcher,
   generationLogger: VideoGenerationLogger,
   now: Date
 ) => {
@@ -314,18 +464,19 @@ const handleMissingArkTask = async (
     return
   }
 
+  const nextPollAt = resolveNextPollAt(now)
   await updateVideoTask(task, repository, generationLogger, 'video_task.poll_rescheduled', '未返回状态，已安排下次轮询', {
     lastPolledAt: now,
-    nextPollAt: resolveNextPollAt(now),
+    nextPollAt,
   })
+  await dispatcher.enqueueSync(task.id, { runAt: nextPollAt }).catch(() => undefined)
 }
 
 const syncTaskResult = async (
   task: VideoRecord,
   result: ArkVideoTaskInfo,
   repository: VideoRepository,
-  ossService: OssServiceContract,
-  fetchImpl: typeof fetch,
+  dispatcher: VideoDispatcher,
   generationLogger: VideoGenerationLogger,
   now: Date
 ) => {
@@ -352,14 +503,16 @@ const syncTaskResult = async (
       return
     }
 
+    const nextPollAt = resolveNextPollAt(now)
     await updateVideoTask(task, repository, generationLogger, 'video_task.poll_progress', '任务状态与下次轮询时间已更新', {
       status: mappedStatus,
       errorMessage: null,
       lastPolledAt: now,
       lastArkStatus: result.status,
       lastArkStatusChangedAt: resolveArkStatusChangedAtPatch(task, result.status, now),
-      nextPollAt: resolveNextPollAt(now),
+      nextPollAt,
     })
+    await dispatcher.enqueueSync(task.id, { runAt: nextPollAt }).catch(() => undefined)
     return
   }
 
@@ -388,76 +541,7 @@ const syncTaskResult = async (
       nextPollAt: null,
     })
 
-    const response = await generationLogger.step(
-      {
-        ...toLogContext(task),
-        stage: 'download',
-        action: 'video_result.download',
-        message: `下载${getProviderLabel(task)}生成结果`,
-        requestPayload: { url: result.videoUrl, arkTaskId: task.arkTaskId, provider: getProviderLabel(task) },
-        responsePayload: (downloadResponse) => ({
-          ok: downloadResponse.ok,
-          status: downloadResponse.status,
-          contentType: downloadResponse.headers.get('content-type'),
-          contentLength: downloadResponse.headers.get('content-length'),
-        }),
-        resultStatus: (downloadResponse) => downloadResponse.ok ? 'succeeded' : 'failed',
-        resultErrorMessage: (downloadResponse) =>
-          downloadResponse.ok ? null : buildArkVideoDownloadFailedMessage(downloadResponse.status, task.arkTaskId, getProviderLabel(task)),
-      },
-      async () => fetchImpl(result.videoUrl as string)
-    )
-    if (!response.ok) {
-      const errorMessage = buildArkVideoDownloadFailedMessage(response.status, task.arkTaskId, getProviderLabel(task))
-      await updateVideoTask(task, repository, generationLogger, 'video_task.download_failed', '结果视频下载失败', {
-        status: 'failed',
-        errorMessage,
-        nextPollAt: null,
-      })
-      if (response.status === 403) {
-        return
-      }
-      throw new Error(errorMessage)
-    }
-
-    const buffer = Buffer.from(await response.arrayBuffer())
-    const contentType = response.headers.get('content-type') ?? 'video/mp4'
-    const ossKey = resolveVideoOssKey(task)
-
-    try {
-      await generationLogger.step(
-        {
-          ...toLogContext(task),
-          stage: 'oss_upload',
-          action: 'video_result.upload_oss',
-          message: '上传结果视频到 OSS',
-          requestPayload: { ossKey, size: buffer.length, contentType },
-          responsePayload: () => ({ ossKey, size: buffer.length, contentType }),
-        },
-        async () => ossService.putObject(ossKey, buffer, contentType)
-      )
-    } catch (error) {
-      await updateVideoTask(task, repository, generationLogger, 'video_task.oss_retry_scheduled', 'OSS 上传失败，已安排重试', {
-        status: 'processing',
-        errorMessage: error instanceof Error ? error.message : String(error),
-        lastPolledAt: now,
-        nextPollAt: resolveNextPollAt(now),
-      })
-      return
-    }
-
-    await updateVideoTask(task, repository, generationLogger, 'video_task.completed', '视频任务已完成', {
-      status: 'succeeded',
-      arkVideoUrl: result.videoUrl,
-      videoOssKey: ossKey,
-      completionTokens: result.completionTokens,
-      totalTokens: result.totalTokens,
-      errorMessage: null,
-      lastPolledAt: now,
-      lastArkStatus: result.status,
-      lastArkStatusChangedAt: resolveArkStatusChangedAtPatch(task, result.status, now),
-      nextPollAt: null,
-    })
+    await dispatcher.enqueueDownload(task.id)
     return
   }
 
@@ -469,6 +553,266 @@ const syncTaskResult = async (
     lastArkStatusChangedAt: resolveArkStatusChangedAtPatch(task, result.status, now),
     nextPollAt: null,
   })
+}
+
+const downloadVideoResult = async (
+  task: VideoRecord,
+  repository: VideoRepository,
+  ossService: OssServiceContract,
+  fetchImpl: typeof fetch,
+  generationLogger: VideoGenerationLogger,
+  now: Date,
+  claimToken: string
+) => {
+  if (!task.arkVideoUrl || task.videoOssKey) {
+    return
+  }
+
+  const downloadUrls = resolveDownloadUrls(task.arkVideoUrl, task)
+  let downloadUrl = downloadUrls[0] ?? task.arkVideoUrl
+  let response: Response | null = null
+  let responseAbortController: AbortController | null = null
+  let cleanupResponseAbortRelay: (() => void) | null = null
+  const totalAbortController = new AbortController()
+  const totalTimeout = setTimeout(
+    () => totalAbortController.abort(new Error('视频下载整体超时')),
+    VIDEO_DOWNLOAD_TOTAL_TIMEOUT_MS
+  )
+  totalTimeout.unref?.()
+
+  const scheduleDownloadRetry = async (errorMessage: string) => {
+    await generationLogger.write({
+      ...toLogContext(task),
+      stage: 'download',
+      action: 'video_result.download',
+      status: 'failed',
+      message: '结果视频下载失败，已安排重试',
+      requestPayload: { url: downloadUrl, arkTaskId: task.arkTaskId },
+      errorMessage,
+    })
+    await updateDownloadState(task, repository, generationLogger, claimToken, 'video_task.download_retry_scheduled', '结果视频下载失败，已安排重试', {
+      status: 'processing',
+      errorMessage: `结果视频下载失败，等待重试: ${errorMessage}`,
+      downloadClaimedAt: null,
+      downloadClaimToken: null,
+      nextPollAt: resolveNextPollAt(now),
+    })
+  }
+
+  try {
+    for (const [index, candidateUrl] of downloadUrls.entries()) {
+      const nextDownloadUrl = downloadUrls[index + 1]
+      downloadUrl = candidateUrl
+
+      // Each candidate gets its own connection timeout. The total timeout is shared so a
+      // failed direct attempt cannot extend the 15-minute ceiling before the proxy attempt.
+      const attemptAbortController = new AbortController()
+      const abortAttemptForTotalTimeout = () => attemptAbortController.abort(totalAbortController.signal.reason)
+      if (totalAbortController.signal.aborted) {
+        abortAttemptForTotalTimeout()
+      } else {
+        totalAbortController.signal.addEventListener('abort', abortAttemptForTotalTimeout, { once: true })
+      }
+      const connectTimeout = setTimeout(
+        () => attemptAbortController.abort(new Error('视频下载连接超时')),
+        VIDEO_DOWNLOAD_CONNECT_TIMEOUT_MS
+      )
+      connectTimeout.unref?.()
+      let keepAttemptController = false
+
+      try {
+        response = await generationLogger.step(
+          {
+            ...toLogContext(task),
+            stage: 'download',
+            action: 'video_result.download',
+            message: `下载${getProviderLabel(task)}生成结果`,
+            requestPayload: {
+              url: downloadUrl,
+              arkTaskId: task.arkTaskId,
+              provider: getProviderLabel(task),
+              attempt: index + 1,
+              candidates: downloadUrls.length,
+            },
+            responsePayload: (downloadResponse) => ({
+              ok: downloadResponse.ok,
+              status: downloadResponse.status,
+              contentType: downloadResponse.headers.get('content-type'),
+              contentLength: downloadResponse.headers.get('content-length'),
+            }),
+            resultStatus: (downloadResponse) => downloadResponse.ok ? 'succeeded' : 'failed',
+            resultErrorMessage: (downloadResponse) =>
+              downloadResponse.ok ? null : buildArkVideoDownloadFailedMessage(downloadResponse.status, task.arkTaskId, getProviderLabel(task)),
+          },
+          async () => fetchImpl(downloadUrl, { signal: attemptAbortController.signal })
+        )
+        keepAttemptController = response.ok
+      } catch (error) {
+        if (nextDownloadUrl && !totalAbortController.signal.aborted && isRecoverableDownloadError(error)) {
+          await writeDownloadFallbackLog(task, generationLogger, downloadUrl, nextDownloadUrl, { error })
+          continue
+        }
+
+        await scheduleDownloadRetry(error instanceof Error ? error.message : String(error))
+        return
+      } finally {
+        clearTimeout(connectTimeout)
+        if (!keepAttemptController) {
+          totalAbortController.signal.removeEventListener('abort', abortAttemptForTotalTimeout)
+        }
+      }
+
+      if (!response.ok) {
+        const errorMessage = buildArkVideoDownloadFailedMessage(response.status, task.arkTaskId, getProviderLabel(task))
+        if (nextDownloadUrl && !totalAbortController.signal.aborted && isRecoverableDownloadStatus(response.status)) {
+          if (response.body) {
+            await response.body.cancel().catch(() => undefined)
+          }
+          await writeDownloadFallbackLog(task, generationLogger, downloadUrl, nextDownloadUrl, { status: response.status })
+          response = null
+          continue
+        }
+
+        if (response.status === 404 || response.status === 403) {
+          await updateDownloadState(task, repository, generationLogger, claimToken, 'video_task.download_failed', '结果视频下载失败', {
+            status: 'failed',
+            errorMessage,
+            downloadClaimedAt: null,
+            downloadClaimToken: null,
+            nextPollAt: null,
+          })
+          return
+        }
+
+        await scheduleDownloadRetry(errorMessage)
+        return
+      }
+
+      responseAbortController = attemptAbortController
+      cleanupResponseAbortRelay = () => {
+        totalAbortController.signal.removeEventListener('abort', abortAttemptForTotalTimeout)
+      }
+      break
+    }
+
+    if (!response || !responseAbortController) {
+      await scheduleDownloadRetry('未获得视频下载响应')
+      return
+    }
+
+    const contentType = response.headers.get('content-type') ?? 'video/mp4'
+    const ossKey = resolveVideoOssKey(task)
+    let uploadStarted = false
+    try {
+      if (!response.body || !ossService.putObjectStream) {
+        const buffer = Buffer.from(await response.arrayBuffer())
+        await generationLogger.step(
+          {
+            ...toLogContext(task),
+            stage: 'oss_upload',
+            action: 'video_result.upload_oss',
+            message: '上传结果视频到 OSS',
+            requestPayload: { ossKey, size: buffer.length, contentType },
+            responsePayload: () => ({ ossKey, size: buffer.length, contentType }),
+          },
+          async () => {
+            uploadStarted = true
+            return ossService.putObject(ossKey, buffer, contentType)
+          }
+        )
+      } else {
+        const source = Readable.fromWeb(response.body as never)
+        const uploadStream = new PassThrough()
+        uploadStream.on('error', () => undefined)
+        let idleTimer: NodeJS.Timeout | undefined
+        const stopStreams = (reason?: unknown) => {
+          const error = reason instanceof Error ? reason : new Error('视频下载流已中止')
+          if (!source.destroyed) source.destroy(error)
+          if (!uploadStream.destroyed) uploadStream.destroy(error)
+        }
+        const onAbort = () => stopStreams(responseAbortController!.signal.reason)
+        const resetIdleTimer = () => {
+          if (idleTimer) clearTimeout(idleTimer)
+          idleTimer = setTimeout(() => {
+            const error = new Error('视频下载空闲超时')
+            responseAbortController!.abort(error)
+          }, VIDEO_DOWNLOAD_IDLE_TIMEOUT_MS)
+          idleTimer.unref?.()
+        }
+        responseAbortController.signal.addEventListener('abort', onAbort, { once: true })
+        source.on('data', resetIdleTimer)
+        source.once('end', () => idleTimer && clearTimeout(idleTimer))
+        source.once('error', (error) => uploadStream.destroy(error))
+        resetIdleTimer()
+        source.pipe(uploadStream)
+        try {
+          await generationLogger.step(
+            {
+              ...toLogContext(task),
+              stage: 'oss_upload',
+              action: 'video_result.upload_oss',
+              message: '流式上传结果视频到 OSS',
+              requestPayload: { ossKey, contentType },
+              responsePayload: () => ({ ossKey, contentType }),
+            },
+            async () => {
+              uploadStarted = true
+              return ossService.putObjectStream!(ossKey, uploadStream, contentType)
+            }
+          )
+        } finally {
+          if (idleTimer) clearTimeout(idleTimer)
+          responseAbortController.signal.removeEventListener('abort', onAbort)
+          source.unpipe(uploadStream)
+          if (!source.readableEnded && !source.destroyed) source.destroy()
+          if (!uploadStream.writableEnded && !uploadStream.destroyed) uploadStream.destroy()
+        }
+      }
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : String(error)
+      if (uploadStarted) {
+        await updateDownloadState(task, repository, generationLogger, claimToken, 'video_task.oss_retry_scheduled', 'OSS 上传失败，已安排重试', {
+          status: 'processing',
+          errorMessage,
+          downloadClaimedAt: null,
+          downloadClaimToken: null,
+          lastPolledAt: now,
+          nextPollAt: resolveNextPollAt(now),
+        })
+        return
+      }
+      await generationLogger.write({
+        ...toLogContext(task),
+        stage: 'download',
+        action: 'video_result.download',
+        status: 'failed',
+        message: '结果视频读取中断，已安排重试',
+        requestPayload: { url: downloadUrl, arkTaskId: task.arkTaskId },
+        errorMessage,
+      })
+      await updateDownloadState(task, repository, generationLogger, claimToken, 'video_task.download_retry_scheduled', '结果视频读取中断，已安排重试', {
+        status: 'processing',
+        errorMessage: `结果视频读取中断，等待重试: ${errorMessage}`,
+        downloadClaimedAt: null,
+        downloadClaimToken: null,
+        nextPollAt: resolveNextPollAt(now),
+      })
+      return
+    }
+
+    await updateDownloadState(task, repository, generationLogger, claimToken, 'video_task.completed', '视频任务已完成', {
+      status: 'succeeded',
+      videoOssKey: ossKey,
+      errorMessage: null,
+      downloadClaimedAt: null,
+      downloadClaimToken: null,
+      lastPolledAt: now,
+      nextPollAt: null,
+    })
+  } finally {
+    cleanupResponseAbortRelay?.()
+    clearTimeout(totalTimeout)
+  }
 }
 
 export const createVideoCreateProcessor =
@@ -541,18 +885,21 @@ export const createVideoCreateProcessor =
         },
         async () => videoClient.createTask(requestSnapshot)
       )
+      const firstPollAt = new Date(
+        runAt.getTime() +
+        (assetReferenceMode === 'signed_url' ? TOAPIS_FIRST_SYNC_POLL_DELAY_MS : FIRST_SYNC_POLL_DELAY_MS)
+      )
       await updateVideoTask(task, repository, generationLogger, 'video_task.ark_created', `${getProviderLabel(task)}任务 ID 与首次轮询时间已保存`, {
         arkTaskId,
         status: 'pending',
         errorMessage: null,
-        nextPollAt: new Date(
-          runAt.getTime() +
-          (assetReferenceMode === 'signed_url' ? TOAPIS_FIRST_SYNC_POLL_DELAY_MS : FIRST_SYNC_POLL_DELAY_MS)
-        ),
+        nextPollAt: firstPollAt,
         lastArkStatus: null,
         lastArkStatusChangedAt: runAt,
         lastPolledAt: null,
       })
+      // BullMQ 延迟任务是主轮询路径；数据库中的 nextPollAt 保留为可恢复的事实来源。
+      await dispatcher.enqueueSync(task.id, { runAt: firstPollAt }).catch(() => undefined)
     } catch (error) {
       await updateVideoTask(task, repository, generationLogger, 'video_task.create_failed', '视频创建流程失败状态已落库', {
         status: 'failed',
@@ -576,12 +923,10 @@ export const createVideoSyncProcessor =
   ({
     repository,
     dispatcher,
-    ossService,
     arkClient,
     resolveClient,
     generationLogger = new VideoGenerationLogger(),
-    fetchImpl = fetch,
-    batchSize = DEFAULT_SYNC_BATCH_SIZE,
+    batchSize = VIDEO_SYNC_SCAN_BATCH_SIZE,
     now = () => new Date(),
   }: VideoSyncProcessorDeps) =>
   async (): Promise<void> => {
@@ -707,12 +1052,12 @@ export const createVideoSyncProcessor =
     for (const task of polledTasks) {
       const result = task.arkTaskId ? resultByArkId.get(task.arkTaskId) : undefined
       if (!result) {
-        await handleMissingArkTask(task, repository, generationLogger, runAt)
+        await handleMissingArkTask(task, repository, dispatcher, generationLogger, runAt)
         continue
       }
 
       try {
-        await syncTaskResult(task, result, repository, ossService, fetchImpl, generationLogger, runAt)
+        await syncTaskResult(task, result, repository, dispatcher, generationLogger, runAt)
       } catch (error) {
         await updateVideoTask(task, repository, generationLogger, 'video_task.sync_failed', '视频状态同步失败状态已落库', {
           status: 'failed',
@@ -726,6 +1071,135 @@ export const createVideoSyncProcessor =
     if (firstError) {
       throw firstError
     }
+  }
+
+// 数据库扫描只负责把到期任务补入 BullMQ。正常轮询由每任务延迟 job 驱动，
+// 因此扫描频率可以高于单任务轮询频率，且不会提前请求上游。
+export const createVideoSyncEnqueuer =
+  ({
+    repository,
+    dispatcher,
+    batchSize = VIDEO_SYNC_SCAN_BATCH_SIZE,
+    now = () => new Date(),
+  }: VideoSyncEnqueuerDeps) =>
+  async (): Promise<void> => {
+    const runAt = now()
+    const tasks = await repository.listSyncableArkTasks({ now: runAt, limit: batchSize })
+    await Promise.all(
+      tasks.map((task) => dispatcher.enqueueSync(task.id, { runAt: task.nextPollAt ?? runAt }))
+    )
+  }
+
+// BullMQ 单任务轮询处理器。nextPollAt 是数据库中的权威时间，旧 job 或过早触发的
+// job 只会重新安排到正确时间，不会造成额外的上游请求。
+export const createVideoSyncTaskProcessor =
+  ({
+    repository,
+    dispatcher,
+    arkClient,
+    resolveClient,
+    generationLogger = new VideoGenerationLogger(),
+    now = () => new Date(),
+  }: VideoSyncTaskProcessorDeps) =>
+  async ({ taskId }: VideoWorkerJob): Promise<void> => {
+    const runAt = now()
+    const task = await repository.findById(taskId)
+    if (
+      !task ||
+      !task.arkTaskId ||
+      task.videoOssKey ||
+      (task.status !== 'pending' && task.status !== 'processing')
+    ) {
+      return
+    }
+
+    if (task.arkVideoUrl) {
+      await dispatcher.enqueueDownload(taskId)
+      return
+    }
+
+    if (task.nextPollAt && task.nextPollAt.getTime() > runAt.getTime()) {
+      await dispatcher.enqueueSync(taskId, { runAt: task.nextPollAt })
+      return
+    }
+
+    const scheduledAt = task.nextPollAt
+    const schedulerLagMs = scheduledAt ? Math.max(0, runAt.getTime() - scheduledAt.getTime()) : null
+    const pollStartedAt = Date.now()
+    const requestPayload = {
+      arkTaskId: task.arkTaskId,
+      batchTaskIds: [task.arkTaskId],
+      scheduledAt,
+      schedulerLagMs,
+    }
+
+    await generationLogger.write({
+      ...toLogContext(task),
+      stage: 'ark_poll',
+      action: 'ark_video.list_tasks',
+      status: 'started',
+      message: `调用${getProviderLabel(task)}视频任务状态查询接口`,
+      requestPayload,
+    })
+
+    let results: ArkVideoTaskInfo[]
+    try {
+      const client = resolveClient ? await resolveClient(task) : arkClient
+      results = await client.listTasks([task.arkTaskId])
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : String(error)
+      const authenticationFailed = isArkAuthenticationError(error)
+      await generationLogger.write({
+        ...toLogContext(task),
+        stage: 'ark_poll',
+        action: 'ark_video.list_tasks',
+        status: 'failed',
+        message: authenticationFailed
+          ? `${getProviderLabel(task)}视频平台认证失败，任务已停止轮询`
+          : `${getProviderLabel(task)}视频任务状态查询失败`,
+        requestPayload,
+        durationMs: Date.now() - pollStartedAt,
+        errorMessage,
+      })
+
+      if (authenticationFailed) {
+        await updateVideoTask(task, repository, generationLogger, 'video_task.auth_failed', `${getProviderLabel(task)}认证失败，已标记任务失败并停止轮询`, {
+          status: 'failed',
+          errorMessage,
+          lastPolledAt: runAt,
+          nextPollAt: null,
+        })
+        return
+      }
+
+      const nextPollAt = resolveNextPollAt(runAt)
+      await updateVideoTask(task, repository, generationLogger, 'video_task.poll_retry_scheduled', '视频状态查询失败，已安排下次轮询', {
+        lastPolledAt: runAt,
+        nextPollAt,
+      })
+      await dispatcher.enqueueSync(task.id, { runAt: nextPollAt }).catch(() => undefined)
+      return
+    }
+
+    const result = results.find((item) => item.id === task.arkTaskId)
+    await generationLogger.write({
+      ...toLogContext(task),
+      stage: 'ark_poll',
+      action: 'ark_video.list_tasks',
+      status: result ? 'succeeded' : 'failed',
+      message: result ? `${getProviderLabel(task)}视频任务状态查询完成` : `${getProviderLabel(task)}查询响应未包含当前任务`,
+      requestPayload,
+      responsePayload: result ?? { found: false },
+      durationMs: Date.now() - pollStartedAt,
+      errorMessage: result ? null : `${getProviderLabel(task)}查询响应未包含当前任务`,
+    })
+
+    if (!result) {
+      await handleMissingArkTask(task, repository, dispatcher, generationLogger, runAt)
+      return
+    }
+
+    await syncTaskResult(task, result, repository, dispatcher, generationLogger, runAt)
   }
 
 export const createVideoReconcileProcessor =
@@ -744,28 +1218,67 @@ export const createVideoReconcileProcessor =
     })
 
     await Promise.all(
-      staleTasks.map((task) =>
-        task.arkTaskId
-          ? Promise.resolve()
-          : generationLogger.step(
-              {
-                ...toLogContext(task),
-                stage: 'reconcile',
-                action: 'video_create.reconciled',
-                message: '停滞任务重新加入视频创建队列',
-                requestPayload: { taskId: task.id },
-                responsePayload: () => ({ taskId: task.id, queue: VIDEO_CREATE_QUEUE_NAME }),
-              },
-              async () => dispatcher.enqueueCreate(task.id)
-            )
-      )
+      staleTasks.map(async (task) => {
+        // 无平台任务 ID：创建阶段停滞，重新入队创建
+        if (!task.arkTaskId) {
+          return generationLogger.step(
+            {
+              ...toLogContext(task),
+              stage: 'reconcile',
+              action: 'video_create.reconciled',
+              message: '停滞任务重新加入视频创建队列',
+              requestPayload: { taskId: task.id },
+              responsePayload: () => ({ taskId: task.id, queue: VIDEO_CREATE_QUEUE_NAME }),
+            },
+            async () => dispatcher.enqueueCreate(task.id)
+          )
+        }
+
+        // 有平台任务 ID 但 next_poll_at 为空且无结果视频（如 worker 在下载阶段中断）：
+        // 恢复轮询时间，让定时器重新拾取（有 arkVideoUrl 的由下载定时器处理，其余由同步定时器处理）
+        if (!task.nextPollAt && !task.videoOssKey) {
+          const pollAt = now()
+          await updateVideoTask(task, repository, generationLogger, 'video_task.repoll_reconciled', '停滞任务已恢复轮询', {
+            nextPollAt: pollAt,
+          })
+          if (task.arkVideoUrl) {
+            await dispatcher.enqueueDownload(task.id)
+          } else {
+            await dispatcher.enqueueSync(task.id, { runAt: pollAt })
+          }
+        }
+      })
     )
+  }
+
+export const createVideoDownloadProcessor =
+  ({
+    repository,
+    ossService,
+    fetchImpl = fetch,
+    generationLogger = new VideoGenerationLogger(),
+    now = () => new Date(),
+  }: VideoDownloadProcessorDeps) =>
+  async ({ taskId }: VideoWorkerJob): Promise<void> => {
+    const runAt = now()
+    const task = await repository.findById(taskId)
+    if (!task || !task.arkVideoUrl || task.videoOssKey) {
+      return
+    }
+
+    const claimToken = await repository.claimDownload(taskId)
+    if (!claimToken) {
+      return
+    }
+
+    await downloadVideoResult(task, repository, ossService, fetchImpl, generationLogger, runAt, claimToken)
   }
 
 export class BullMqVideoDispatcher implements VideoDispatcher {
   private readonly connection = createRedisConnection()
   private createQueue?: Queue<VideoWorkerJob>
   private syncQueue?: Queue<VideoWorkerJob>
+  private downloadQueue?: Queue<VideoWorkerJob>
 
   private getCreateQueue(): Queue<VideoWorkerJob> {
     this.createQueue ??= new Queue<VideoWorkerJob>(VIDEO_CREATE_QUEUE_NAME, {
@@ -779,6 +1292,13 @@ export class BullMqVideoDispatcher implements VideoDispatcher {
       connection: this.connection,
     })
     return this.syncQueue
+  }
+
+  private getDownloadQueue(): Queue<VideoWorkerJob> {
+    this.downloadQueue ??= new Queue<VideoWorkerJob>(VIDEO_DOWNLOAD_QUEUE_NAME, {
+      connection: this.connection,
+    })
+    return this.downloadQueue
   }
 
   public async enqueueCreate(taskId: number): Promise<void> {
@@ -798,19 +1318,68 @@ export class BullMqVideoDispatcher implements VideoDispatcher {
     )
   }
 
-  public async enqueueSync(taskId: number, options?: { delayMs?: number }): Promise<void> {
-    await this.getSyncQueue().add(
+  public async enqueueSync(taskId: number, options?: { delayMs?: number; runAt?: Date }): Promise<void> {
+    const queue = this.getSyncQueue()
+    const nowMs = Date.now()
+    const requestedRunAtMs = options?.runAt?.getTime()
+    const runAtMs = Number.isFinite(requestedRunAtMs)
+      ? Math.max(0, requestedRunAtMs as number)
+      : nowMs + Math.max(0, options?.delayMs ?? 0)
+    const jobId = resolveVideoSyncJobId(taskId, runAtMs)
+    const existing = await queue.getJob(jobId)
+    if (existing) {
+      const state = await existing.getState()
+      if (state === 'waiting' || state === 'active' || state === 'delayed' || state === 'waiting-children' || state === 'prioritized') {
+        return
+      }
+      try {
+        await existing.remove()
+      } catch {
+        return
+      }
+    }
+
+    await queue.add(
       VIDEO_SYNC_QUEUE_NAME,
       { taskId },
       {
+        jobId,
         attempts: 2,
         backoff: {
           type: 'exponential',
           delay: 5_000,
         },
-        delay: options?.delayMs ?? 0,
+        delay: Math.max(0, Math.trunc(runAtMs - nowMs)),
         removeOnComplete: true,
         removeOnFail: 100,
+      }
+    )
+  }
+
+  public async enqueueDownload(taskId: number): Promise<void> {
+    const queue = this.getDownloadQueue()
+    const jobId = `video-download-${taskId}`
+    const existing = await queue.getJob(jobId)
+    if (existing) {
+      const state = await existing.getState()
+      if (state === 'waiting' || state === 'active' || state === 'delayed' || state === 'waiting-children' || state === 'prioritized') {
+        return
+      }
+      try {
+        await existing.remove()
+      } catch {
+        return
+      }
+    }
+
+    await queue.add(
+      VIDEO_DOWNLOAD_QUEUE_NAME,
+      { taskId },
+      {
+        jobId,
+        attempts: 1,
+        removeOnComplete: true,
+        removeOnFail: true,
       }
     )
   }
@@ -838,11 +1407,11 @@ export const startVideoWorkers = (dependencies?: {
   const resolveClient = dependencies?.arkClient
     ? undefined
     : async (task: VideoRecord): Promise<ArkVideoClient> => {
-        if (!task.providerSnapshot) {
-          throw new Error('视频任务缺少平台快照，无法创建或查询任务')
-        }
-        const connection = await providerService.getClientConfiguration(task.providerSnapshot)
-        return new ArkBearerClient({
+      if (!task.providerSnapshot) {
+        throw new Error('视频任务缺少平台快照，无法创建或查询任务')
+      }
+      const connection = await providerService.getClientConfiguration(task.providerSnapshot, task.userId)
+      return new ArkBearerClient({
           getEndpoint: async () => connection.endpoint,
           getApiKey: async () => connection.apiKey,
           providerType: task.providerSnapshot.providerType,
@@ -863,12 +1432,20 @@ export const startVideoWorkers = (dependencies?: {
     generationLogger,
   })
 
-  const syncProcessor = createVideoSyncProcessor({
+  const syncEnqueuer = createVideoSyncEnqueuer({
     repository,
     dispatcher,
-    ossService,
+  })
+  const syncTaskProcessor = createVideoSyncTaskProcessor({
+    repository,
+    dispatcher,
     arkClient,
     resolveClient,
+    generationLogger,
+  })
+  const downloadProcessor = createVideoDownloadProcessor({
+    repository,
+    ossService,
     generationLogger,
   })
   const reconcileProcessor = createVideoReconcileProcessor({
@@ -877,18 +1454,22 @@ export const startVideoWorkers = (dependencies?: {
     generationLogger,
   })
 
-  let syncRunning = false
-  const runSyncProcessor = async () => {
-    if (syncRunning) {
-      workerLogger.warn({ queue: VIDEO_SYNC_QUEUE_NAME }, 'video sync processor skipped because previous run is still active')
+  let syncEnqueuerRunning = false
+  const runSyncEnqueuer = async () => {
+    if (syncEnqueuerRunning) {
+      workerLogger.warn({ queue: VIDEO_SYNC_QUEUE_NAME }, 'video sync enqueuer skipped because previous scan is still active')
       return
     }
 
-    syncRunning = true
+    syncEnqueuerRunning = true
     try {
-      await syncProcessor()
+      const watchdog = new Promise<never>((_, reject) => {
+        const timer = setTimeout(() => reject(new Error(`video sync enqueuer timed out after ${SYNC_ENQUEUE_TIMEOUT_MS}ms`)), SYNC_ENQUEUE_TIMEOUT_MS)
+        timer.unref?.()
+      })
+      await Promise.race([syncEnqueuer(), watchdog])
     } finally {
-      syncRunning = false
+      syncEnqueuerRunning = false
     }
   }
 
@@ -903,10 +1484,19 @@ export const startVideoWorkers = (dependencies?: {
 
   const syncWorker = new Worker<VideoWorkerJob>(
     VIDEO_SYNC_QUEUE_NAME,
-    async () => undefined,
+    async (job: Job<VideoWorkerJob>) => syncTaskProcessor(job.data),
     {
       connection,
-      concurrency: 2,
+      concurrency: VIDEO_SYNC_CONCURRENCY,
+    }
+  )
+
+  const downloadWorker = new Worker<VideoWorkerJob>(
+    VIDEO_DOWNLOAD_QUEUE_NAME,
+    async (job: Job<VideoWorkerJob>) => downloadProcessor(job.data),
+    {
+      connection,
+      concurrency: VIDEO_DOWNLOAD_CONCURRENCY,
     }
   )
 
@@ -944,6 +1534,23 @@ export const startVideoWorkers = (dependencies?: {
     workerLogger.error(logPayload, 'video sync worker failed')
   })
 
+  downloadWorker.on('failed', (job, error) => {
+    const errorDetails = classifyWorkerError(error)
+    const logPayload = {
+      queue: VIDEO_DOWNLOAD_QUEUE_NAME,
+      jobId: job?.id,
+      jobData: job?.data,
+      ...errorDetails,
+    }
+
+    if (errorDetails.recoverable) {
+      workerLogger.warn(logPayload, 'video download worker failed with recoverable error')
+      return
+    }
+
+    workerLogger.error(logPayload, 'video download worker failed')
+  })
+
   createWorker.on('error', (error) => {
     workerLogger.error({ queue: VIDEO_CREATE_QUEUE_NAME, ...classifyWorkerError(error) }, 'video create worker runtime error')
   })
@@ -952,22 +1559,49 @@ export const startVideoWorkers = (dependencies?: {
     workerLogger.error({ queue: VIDEO_SYNC_QUEUE_NAME, ...classifyWorkerError(error) }, 'video sync worker runtime error')
   })
 
+  downloadWorker.on('error', (error) => {
+    workerLogger.error({ queue: VIDEO_DOWNLOAD_QUEUE_NAME, ...classifyWorkerError(error) }, 'video download worker runtime error')
+  })
+
   workerLogger.info(
     {
-      queues: [VIDEO_CREATE_QUEUE_NAME, VIDEO_SYNC_QUEUE_NAME],
+      queues: [VIDEO_CREATE_QUEUE_NAME, VIDEO_SYNC_QUEUE_NAME, VIDEO_DOWNLOAD_QUEUE_NAME],
     },
     'video worker service started'
   )
 
+  void runSyncEnqueuer().catch((error) => {
+    workerLogger.error(
+      { queue: VIDEO_SYNC_QUEUE_NAME, ...classifyWorkerError(error) },
+      'initial video sync enqueuer failed'
+    )
+  })
+
   const syncTimer = setInterval(() => {
-    void runSyncProcessor().catch((error) => {
+    void runSyncEnqueuer().catch((error) => {
       workerLogger.error(
         { queue: VIDEO_SYNC_QUEUE_NAME, ...classifyWorkerError(error) },
-        'video sync processor failed'
+        'video sync enqueuer failed'
       )
     })
-  }, DEFAULT_SYNC_POLL_INTERVAL_MS)
+  }, VIDEO_SYNC_SCAN_INTERVAL_MS)
   syncTimer.unref?.()
+
+  const downloadTimer = setInterval(() => {
+    void (async () => {
+      const now = new Date()
+      const tasks = await repository.listDownloadableTasks({ now, limit: VIDEO_SYNC_SCAN_BATCH_SIZE })
+      await Promise.all(
+        tasks.map((task) => dispatcher.enqueueDownload(task.id))
+      )
+    })().catch((error) => {
+      workerLogger.error(
+        { queue: VIDEO_DOWNLOAD_QUEUE_NAME, ...classifyWorkerError(error) },
+        'video download enqueuer failed'
+      )
+    })
+  }, DEFAULT_DOWNLOAD_POLL_INTERVAL_MS)
+  downloadTimer.unref?.()
 
   const reconcileTimer = setInterval(() => {
     void reconcileProcessor().catch((error) => {
@@ -982,7 +1616,9 @@ export const startVideoWorkers = (dependencies?: {
   return {
     createWorker,
     syncWorker,
+    downloadWorker,
     syncTimer,
+    downloadTimer,
     reconcileTimer,
   }
 }

@@ -76,6 +76,8 @@ export interface VideoTasksTable {
   request_snapshot: JsonObjectColumn
   ark_video_url: string | null
   video_oss_key: string | null
+  download_claimed_at: TimestampColumn | null
+  download_claim_token: string | null
   completion_tokens: number | null
   total_tokens: number | null
   error_message: string | null
@@ -159,6 +161,16 @@ export interface VideoGenerationLogsTable {
   created_at: TimestampColumn
 }
 
+export interface UserApiKeysTable {
+  id: ColumnType<number, never, never>
+  user_id: number
+  provider_key: string
+  api_key_encrypted: string
+  enabled: boolean
+  created_at: TimestampColumn
+  updated_at: TimestampColumn
+}
+
 export interface Database {
   users: UsersTable
   system_config: SystemConfigTable
@@ -171,6 +183,7 @@ export interface Database {
   video_providers: VideoProvidersTable
   video_task_assets: VideoTaskAssetsTable
   video_generation_logs: VideoGenerationLogsTable
+  user_api_keys: UserApiKeysTable
 }
 
 const createPool = (): Pool =>

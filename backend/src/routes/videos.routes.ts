@@ -10,6 +10,7 @@ import type { ProjectAccessRepository } from '../services/project-access.service
 import type { VideoGenerationLogger } from '../services/video-generation-log.service'
 import { VideoService, type VideoAssetReferenceResolver, type VideoDispatcher, type VideoRepository } from '../services/video.service'
 import { VideoProviderService } from '../services/video-provider.service'
+import { UserApiKeyService } from '../services/user-api-key.service'
 import {
   analyticsVideosQuerySchema,
   createVideoSchema,
@@ -27,15 +28,17 @@ export const createVideosRouter = (
   generationLogger?: VideoGenerationLogger
 ): Router => {
   const router = new Router({ prefix: '/api/videos' })
+  const configService = new ConfigService({ store: configStore })
   const controller = new VideosController(
     new VideoService(
       videoRepository,
       videoDispatcher,
       ossService,
-      new ConfigService({ store: configStore }),
+      configService,
       assetReferenceResolver,
       generationLogger,
-      new VideoProviderService(new ConfigService({ store: configStore }))
+      new VideoProviderService(configService),
+      new UserApiKeyService(configService)
     )
   )
 

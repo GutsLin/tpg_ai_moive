@@ -48,7 +48,7 @@ export const createVideoSchema = z
     content: z
       .array(z.union([textContentSchema, imageContentSchema, videoContentSchema, audioContentSchema]))
       .min(1)
-      .max(16),
+      .max(51),
   })
   .superRefine((value, ctx) => {
     if (value.mode !== 'frames') {

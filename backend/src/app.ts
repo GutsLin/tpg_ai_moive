@@ -14,6 +14,7 @@ import { createAuthRouter } from './routes/auth.routes'
 import { createConfigRouter } from './routes/config.routes'
 import { createProjectsRouter } from './routes/projects.routes'
 import { createSetupRouter } from './routes/setup.routes'
+import { createUserApiKeysRouter } from './routes/user-api-keys.routes'
 import { createUsersRouter } from './routes/users.routes'
 import { createVideoGenerationLogsRouter } from './routes/video-generation-logs.routes'
 import { createVideosRouter } from './routes/videos.routes'
@@ -26,6 +27,7 @@ import { OssService, type OssServiceContract } from './services/oss.service'
 import type { ProjectAccessRepository } from './services/project-access.service'
 import type { ProjectMemberRepository, ProjectRepository } from './services/project.service'
 import { SetupService, type SetupServiceContract } from './services/setup.service'
+import { UserApiKeyService } from './services/user-api-key.service'
 import { UserService, type UserProjectRepository, type UserRepository } from './services/user.service'
 import {
   KyselyVideoGenerationLogRepository,
@@ -35,6 +37,7 @@ import {
 } from './services/video-generation-log.service'
 import { type VideoDispatcher, type VideoRepository } from './services/video.service'
 import type { VideoAssetReferenceResolver } from './services/video.service'
+import { VideoProviderService } from './services/video-provider.service'
 import { appLogger } from './utils/logger'
 import { BullMqAssetDispatcher } from './workers/asset-sync.worker'
 import { BullMqVideoDispatcher } from './workers/video.worker'
@@ -111,6 +114,11 @@ export const createApp = (dependencies: AppDependencies = {}): Koa => {
   const projectsRouter = createProjectsRouter(dependencies.projectRepository, dependencies.projectMemberRepository)
   const setupRouter = setupService ? createSetupRouter(setupService) : null
   const usersRouter = createUsersRouter(userService)
+  const userApiKeysRouter = createUserApiKeysRouter(
+    new UserApiKeyService(configService),
+    configService,
+    new VideoProviderService(configService)
+  )
 
   app.use(errorHandler())
   app.use(requestLoggerMiddleware())
@@ -150,6 +158,8 @@ export const createApp = (dependencies: AppDependencies = {}): Koa => {
   app.use(configRouter.allowedMethods())
   app.use(usersRouter.routes())
   app.use(usersRouter.allowedMethods())
+  app.use(userApiKeysRouter.routes())
+  app.use(userApiKeysRouter.allowedMethods())
   app.use(projectsRouter.routes())
   app.use(projectsRouter.allowedMethods())
   app.use(router.routes())

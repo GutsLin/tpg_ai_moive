@@ -11,12 +11,6 @@ export interface ConfigListResponse {
   items: ConfigItem[]
 }
 
-export interface ConfigArkAssetGroupItem {
-  id: string
-  name: string
-  description: string | null
-}
-
 export interface PublicBrandingResponse {
   systemName: string
   logoUrl: string | null
@@ -36,20 +30,18 @@ export const updateConfigItems = async (items: Array<{ key: string; value: strin
   await request.put('/api/config', { items })
 }
 
-export const listConfigArkAssetGroups = async (payload: {
-  accessKey?: string
-  secretKey?: string
-} = {}): Promise<{ items: ConfigArkAssetGroupItem[] }> => {
-  const response = await request.post<{ items: ConfigArkAssetGroupItem[] }>('/api/config/ark/asset-groups/list', payload)
+export type ApiKeyMode = 'global' | 'per_member'
+
+export interface ApiKeyModeResponse {
+  mode: ApiKeyMode
+}
+
+export const getApiKeyMode = async (): Promise<ApiKeyModeResponse> => {
+  const response = await request.get<ApiKeyModeResponse>('/api/config/api-key-mode')
   return response.data
 }
 
-export const createConfigArkAssetGroup = async (payload: {
-  accessKey?: string
-  secretKey?: string
-  name: string
-  description?: string
-}): Promise<ConfigArkAssetGroupItem> => {
-  const response = await request.post<ConfigArkAssetGroupItem>('/api/config/ark/asset-groups', payload)
+export const setApiKeyMode = async (mode: ApiKeyMode): Promise<ApiKeyModeResponse> => {
+  const response = await request.put<ApiKeyModeResponse>('/api/config/api-key-mode', { mode })
   return response.data
 }

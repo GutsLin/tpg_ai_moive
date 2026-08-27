@@ -14,6 +14,10 @@ import { classifyWorkerError, createWorkerLogger } from './worker-runtime'
 export const ASSET_SYNC_QUEUE_NAME = 'sync-asset-status'
 export const ASSET_DELETE_QUEUE_NAME = 'delete-asset'
 
+// 定时重推停滞素材的间隔与停滞判定阈值（processing 正常轮询最长约 2 分钟，超出视为停滞）
+const ASSET_RECONCILE_INTERVAL_MS = 2 * 60_000
+const ASSET_RECONCILE_STALE_AFTER_MS = 3 * 60_000
+
 export interface AssetWorkerJob {
   assetId: number
 }
@@ -56,6 +60,16 @@ const createRedisConnection = () =>
     maxRetriesPerRequest: null,
     lazyConnect: true,
   })
+
+// 瞬时错误（网络抖动/平台 5xx）不应把素材标记为 failed 终态，保持 pending 等待自动重试
+const TRANSIENT_ERROR_PATTERN = /fetch failed|timeout|timed out|abort|econnreset|econnrefused|enotfound|socket hang up|502|503|504|请求过于频繁|rate.?limit/i
+
+export const isTransientAssetSyncError = (error: unknown): boolean => {
+  if (!(error instanceof Error)) {
+    return false
+  }
+  return TRANSIENT_ERROR_PATTERN.test(error.message)
+}
 
 const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms))
 
@@ -240,9 +254,19 @@ export const createAssetSyncProcessor =
         arkError: 'timeout',
       })
     } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : String(error)
+      if (isTransientAssetSyncError(error)) {
+        // 网络抖动/平台 5xx 属瞬时错误：回到 pending 由 BullMQ 重试与定时 reconcile 兜底，不落 failed 终态
+        await repository.update(assetId, {
+          arkStatus: 'pending',
+          arkError: `同步暂时失败，等待自动重试: ${errorMessage}`,
+        })
+        throw error
+      }
+
       await repository.update(assetId, {
         arkStatus: 'failed',
-        arkError: error instanceof Error ? error.message : String(error),
+        arkError: errorMessage,
       })
       throw error
     }
@@ -270,11 +294,12 @@ export const createAssetDeleteProcessor =
         const projectName = await getProjectName(asset.sourceProjectId)
         await arkClient.deleteAsset(asset.arkAssetId, projectName)
       } catch (error) {
+        // 远端删除失败不再阻断本地清理（重试会因 OSS 已删而 404 跳过、因本地已删而找不到记录直接返回），
+        // 残留的远端素材由 reconcile 周期重推本流程时按幂等规则处理
         if (!isArkAssetAlreadyDeletedError(error)) {
           await repository.update(assetId, {
             arkError: formatDeleteError('火山素材', error),
           })
-          throw error
         }
       }
     }
@@ -375,6 +400,38 @@ export const startAssetWorkers = (dependencies?: {
       concurrency: 2,
     }
   )
+
+  // 周期兜底：BullMQ 重试耗尽或 worker 重启后，停滞的 pending/processing/deleting 素材自动恢复
+  // （网络抖动导致的批量 fetch failed、轮询中断的 processing 均会在网络恢复后自动补齐）
+  const reconcileStaleAssets = async () => {
+    try {
+      const stale = await repository.listByStatuses(['pending', 'processing', 'deleting'])
+      const cutoff = Date.now() - ASSET_RECONCILE_STALE_AFTER_MS
+      const syncTargets = stale.filter((item) => item.arkStatus !== 'deleting' && new Date(item.updatedAt).getTime() < cutoff)
+      const deleteTargets = stale.filter((item) => item.arkStatus === 'deleting' && new Date(item.updatedAt).getTime() < cutoff)
+
+      for (const item of syncTargets) {
+        await syncProcessor({ assetId: item.id }).catch(() => undefined)
+      }
+      for (const item of deleteTargets) {
+        await deleteProcessor({ assetId: item.id }).catch(() => undefined)
+      }
+
+      if (syncTargets.length + deleteTargets.length > 0) {
+        workerLogger.info(
+          { queue: ASSET_SYNC_QUEUE_NAME, syncCount: syncTargets.length, deleteCount: deleteTargets.length },
+          'stale assets reconciled'
+        )
+      }
+    } catch (error) {
+      workerLogger.error({ queue: ASSET_SYNC_QUEUE_NAME, ...classifyWorkerError(error) }, 'asset reconcile processor failed')
+    }
+  }
+
+  const reconcileTimer = setInterval(() => {
+    void reconcileStaleAssets()
+  }, ASSET_RECONCILE_INTERVAL_MS)
+  reconcileTimer.unref?.()
 
   syncWorker.on('failed', (job, error) => {
     const errorDetails = classifyWorkerError(error)

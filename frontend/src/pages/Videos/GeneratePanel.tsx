@@ -1,10 +1,11 @@
 import { AppstoreAddOutlined, ReloadOutlined } from '@ant-design/icons'
-import { Button, Modal, Select, Space, Tag, Typography, message } from 'antd'
+import { Alert, Button, Modal, Select, Space, Tag, Typography, message } from 'antd'
 import { useEffect, useRef, useState } from 'react'
 
 import type { AssetItem } from '../../api/assets'
 import type { ActiveVideoProvider, CreateVideoTaskPayload } from '../../api/videos'
 import { getActiveVideoProvider } from '../../api/video-provider'
+import { getMyApiKeys } from '../../api/user-api-keys'
 import { useAuth } from '../../stores/auth'
 import { clearVideoDraft, readVideoDraft, writeVideoDraft } from '../../utils/video-draft-storage'
 import { AssetMediaPreview } from './AssetMediaPreview'
@@ -212,6 +213,9 @@ export const GeneratePanel = ({
   const [provider, setProvider] = useState<ActiveVideoProvider | null>(null)
   const [providerLoading, setProviderLoading] = useState(true)
   const [providerError, setProviderError] = useState<string | null>(null)
+  const [missingPersonalKey, setMissingPersonalKey] = useState(false)
+
+  const apiKeyMode = state.apiKeyMode
 
   const selectedModel = provider?.capabilities.models.find((item) => item.id === model) ?? null
   const modelOptions = provider?.capabilities.models.map((item) => ({ label: item.label, value: item.id })) ?? []
@@ -298,6 +302,27 @@ export const GeneratePanel = ({
       })
     return () => { cancelled = true }
   }, [])
+
+  useEffect(() => {
+    if (apiKeyMode !== 'per_member') {
+      setMissingPersonalKey(false)
+      return
+    }
+
+    let cancelled = false
+    void getMyApiKeys()
+      .then((result) => {
+        if (cancelled) return
+        const hasKey = result.items.some((item) => item.enabled)
+        setMissingPersonalKey(!hasKey)
+      })
+      .catch(() => {
+        if (cancelled) return
+        setMissingPersonalKey(false)
+      })
+
+    return () => { cancelled = true }
+  }, [apiKeyMode])
 
   useEffect(() => {
     const initialModel = provider?.capabilities.models[0]
@@ -420,11 +445,21 @@ export const GeneratePanel = ({
     } else if (pickerMode === 'last') {
       setLastFrame(asset)
     } else if (pickerMode === 'reference') {
+      const fallbackLimits = { image: 9, video: 3, audio: 3 } as const
+      const resolveLimit = (assetType: AssetItem['assetType']) => {
+        const key = assetType.toLowerCase() as keyof typeof fallbackLimits
+        // 生效上限 = 全局配置与所选模型上限的较小值；两者都缺失时才回退到内置默认值
+        const candidates = [
+          provider?.referenceLimits?.[key],
+          selectedModel?.referenceLimits?.[key],
+        ].filter((value): value is number => typeof value === 'number' && value >= 1)
+        return candidates.length > 0 ? Math.min(...candidates) : fallbackLimits[key]
+      }
       const limits = {
-        Image: 9,
-        Video: 3,
-        Audio: 3,
-      } as const
+        Image: resolveLimit('Image'),
+        Video: resolveLimit('Video'),
+        Audio: resolveLimit('Audio'),
+      }
       const existing = references.filter((item) => item.assetType === asset.assetType)
       if (existing.length >= limits[asset.assetType]) {
         void messageApi.warning(`${asset.assetType} 类型已达到可选上限`)
@@ -553,6 +588,15 @@ export const GeneratePanel = ({
         }}
       >
         <Space orientation="vertical" size={18} style={{ width: '100%' }}>
+          {apiKeyMode === 'per_member' && missingPersonalKey ? (
+            <Alert
+              type="warning"
+              showIcon
+              message="您尚未配置个人 API Key，当前无法生成视频"
+              description="请联系管理员在「用户管理」中为您配置 ToAPIs API Key。"
+            />
+          ) : null}
+
           <div
             role="radiogroup"
             aria-label="生成模式"
@@ -632,20 +676,12 @@ export const GeneratePanel = ({
                   onAction={() => setPickerMode('last')}
                 />
               </div>
-              <textarea
-                aria-label="首尾帧提示词"
+              <PromptInput
                 value={framePrompt}
+                onChange={setFramePrompt}
+                availableMentions={[firstFrame?.name, lastFrame?.name].filter((n): n is string => Boolean(n))}
+                ariaLabel="首尾帧提示词"
                 placeholder="描述镜头动作、运镜和氛围，例如：镜头缓慢推近，角色抬头看向远方。"
-                onChange={(event) => setFramePrompt(event.target.value)}
-                rows={5}
-                style={{
-                  width: '100%',
-                  borderRadius: 20,
-                  border: '1px solid #cbd5e1',
-                  padding: 16,
-                  resize: 'vertical',
-                  minHeight: 120,
-                }}
               />
             </Space>
           ) : (
@@ -668,6 +704,8 @@ export const GeneratePanel = ({
                 value={omniPrompt}
                 onChange={setOmniPrompt}
                 availableMentions={references.map((item) => item.name)}
+                ariaLabel="创意提示词"
+                placeholder="输入创意描述，可使用 @素材名 引用已选素材"
               />
               {references.length > 0 ? (
                 <ReferencePreviewSection
@@ -682,7 +720,7 @@ export const GeneratePanel = ({
             <Button onClick={handleClearDraft} disabled={isDraftEmpty}>
               清空草稿
             </Button>
-            <Button type="primary" size="large" loading={submitting} disabled={!provider || !selectedModel} onClick={() => void handleSubmit()}>
+            <Button type="primary" size="large" loading={submitting} disabled={!provider || !selectedModel || (apiKeyMode === 'per_member' && missingPersonalKey)} onClick={() => void handleSubmit()}>
               开始生成
             </Button>
           </Space>

@@ -13,16 +13,37 @@ import type { VideoDispatcher, VideoDurationEstimate, VideoQueryParams, VideoRec
 import {
   BullMqVideoDispatcher,
   createVideoCreateProcessor,
+  createVideoDownloadProcessor,
   createVideoReconcileProcessor,
+  createVideoSyncEnqueuer,
   createVideoSyncProcessor,
+  createVideoSyncTaskProcessor,
   resolveVideoWorkerDispatcher,
+  resolveVideoSyncJobId,
+  VIDEO_SYNC_POLL_INTERVAL_MS,
+  VIDEO_SYNC_SCAN_BATCH_SIZE,
+  VIDEO_SYNC_SCAN_INTERVAL_MS,
 } from '../../backend/src/workers/video.worker'
 
 class FakeVideoRepository implements VideoRepository {
   private records = new Map<number, VideoRecord>()
   public readonly updates: Array<{ id: number; patch: Partial<VideoRecord> }> = []
   public readonly syncableCalls: Array<{ now: Date; limit: number }> = []
+  public readonly downloadableCalls: Array<{ now: Date; limit: number }> = []
   public staleIds: number[] = []
+  public async claimDownload(taskId: number): Promise<string | null> {
+    const record = this.records.get(taskId)
+    if (!record || record.status !== 'processing' || !record.arkVideoUrl || record.videoOssKey || record.downloadClaimedAt) return null
+    record.downloadClaimedAt = new Date()
+    record.downloadClaimToken = `claim-${taskId}`
+    return record.downloadClaimToken
+  }
+
+  public async updateDownloadState(id: number, claimToken: string, patch: Partial<VideoRecord>): Promise<VideoRecord | null> {
+    const record = this.records.get(id)
+    if (!record || record.status !== 'processing' || record.videoOssKey || record.downloadClaimToken !== claimToken) return null
+    return this.update(id, patch)
+  }
 
   public seed(records: Array<Omit<VideoRecord, 'nextPollAt' | 'lastArkStatus' | 'lastArkStatusChangedAt' | 'lastPolledAt'> & Partial<Pick<VideoRecord, 'nextPollAt' | 'lastArkStatus' | 'lastArkStatusChangedAt' | 'lastPolledAt'>>>) {
     this.records = new Map(records.map((record) => {
@@ -42,6 +63,8 @@ class FakeVideoRepository implements VideoRepository {
       ]
     }))
     this.updates.length = 0
+    this.syncableCalls.length = 0
+    this.downloadableCalls.length = 0
   }
 
   public async create(input: Omit<VideoRecord, 'id' | 'createdAt' | 'updatedAt'>): Promise<VideoRecord> {
@@ -98,6 +121,7 @@ class FakeVideoRepository implements VideoRepository {
         (record.status === 'pending' || record.status === 'processing') &&
         Boolean(record.arkTaskId) &&
         !record.videoOssKey &&
+        !record.arkVideoUrl &&
         record.nextPollAt !== null &&
         record.nextPollAt <= input.now
       )
@@ -107,6 +131,24 @@ class FakeVideoRepository implements VideoRepository {
       )
 
     return syncable.slice(0, input.limit)
+  }
+
+  public async listDownloadableTasks(input: { now: Date; limit: number }): Promise<VideoRecord[]> {
+    this.downloadableCalls.push(input)
+    const downloadable = [...this.records.values()]
+      .filter((record) =>
+        record.status === 'processing' &&
+        Boolean(record.arkVideoUrl) &&
+        !record.videoOssKey &&
+        record.nextPollAt !== null &&
+        record.nextPollAt <= input.now
+      )
+      .sort((left, right) =>
+        (left.nextPollAt?.getTime() ?? 0) - (right.nextPollAt?.getTime() ?? 0) ||
+        left.updatedAt.getTime() - right.updatedAt.getTime()
+      )
+
+    return downloadable.slice(0, input.limit)
   }
 
   public async update(id: number, patch: Partial<VideoRecord>): Promise<VideoRecord | null> {
@@ -140,14 +182,23 @@ class FakeVideoRepository implements VideoRepository {
 
 class FakeVideoDispatcher implements VideoDispatcher {
   public readonly createIds: number[] = []
-  public readonly syncCalls: Array<{ taskId: number; delayMs?: number }> = []
+  public readonly syncCalls: Array<{ taskId: number; delayMs?: number; runAt?: Date }> = []
+  public readonly downloadCalls: number[] = []
 
   public async enqueueCreate(taskId: number): Promise<void> {
     this.createIds.push(taskId)
   }
 
-  public async enqueueSync(taskId: number, options?: { delayMs?: number }): Promise<void> {
-    this.syncCalls.push({ taskId, delayMs: options?.delayMs })
+  public async enqueueSync(taskId: number, options?: { delayMs?: number; runAt?: Date }): Promise<void> {
+    this.syncCalls.push({
+      taskId,
+      ...(options?.delayMs === undefined ? {} : { delayMs: options.delayMs }),
+      ...(options?.runAt === undefined ? {} : { runAt: options.runAt }),
+    })
+  }
+
+  public async enqueueDownload(taskId: number): Promise<void> {
+    this.downloadCalls.push(taskId)
   }
 }
 
@@ -228,6 +279,7 @@ class FakeOssService implements OssServiceContract {
     this.putCalls.push({ ossKey, size: data.length, contentType })
   }
 
+
   public async getStsCredentials() {
     return {
       credentials: {
@@ -274,10 +326,239 @@ describe('video.worker', () => {
     ossService = new FakeOssService()
   })
 
+  const makeSyncTaskRecord = (id: number, overrides: Partial<VideoRecord> = {}): VideoRecord => ({
+    id,
+    userId: 1,
+    projectId: 101,
+    arkTaskId: `task-${id}`,
+    idempotencyKey: `idem-${id}`,
+    status: 'processing',
+    model: 'doubao-seedance-2-0-260128',
+    prompt: '轮询任务',
+    promptRaw: '轮询任务',
+    duration: 5,
+    ratio: '16:9',
+    resolution: '720p',
+    generateAudio: true,
+    providerKey: null,
+    providerSnapshot: null,
+    requestSnapshot: { model: 'doubao-seedance-2-0-260128', content: [] },
+    arkVideoUrl: null,
+    videoOssKey: null,
+    completionTokens: null,
+    totalTokens: null,
+    errorMessage: null,
+    nextPollAt: new Date('2026-04-04T00:00:00.000Z'),
+    lastArkStatus: 'processing',
+    lastArkStatusChangedAt: new Date('2026-04-04T00:00:00.000Z'),
+    lastPolledAt: null,
+    createdAt: new Date('2026-04-04T00:00:00.000Z'),
+    updatedAt: new Date('2026-04-04T00:00:00.000Z'),
+    ...overrides,
+  })
+
+  const seedToapisDownloadTask = (id: number, arkVideoUrl: string) => {
+    repository.seed([
+      {
+        id,
+        userId: 1,
+        projectId: 101,
+        arkTaskId: `task-toapis-${id}`,
+        idempotencyKey: `idem-toapis-${id}`,
+        status: 'processing',
+        model: 'seedance-2',
+        prompt: '下载 ToAPIs 视频',
+        promptRaw: '下载 ToAPIs 视频',
+        duration: 5,
+        ratio: '16:9',
+        resolution: '720p',
+        generateAudio: true,
+        providerKey: 'toapis',
+        providerSnapshot: {
+          providerKey: 'toapis',
+          name: 'ToAPIs',
+          providerType: 'toapis',
+          endpoint: 'https://toapis.xyz/v1',
+          capabilities: { version: 1, models: [] },
+        },
+        requestSnapshot: { model: 'seedance-2', content: [] },
+        arkVideoUrl,
+        videoOssKey: null,
+        completionTokens: 10,
+        totalTokens: 20,
+        errorMessage: null,
+        nextPollAt: null,
+        lastArkStatus: 'succeeded',
+        createdAt: new Date('2026-04-04T00:00:00.000Z'),
+        updatedAt: new Date('2026-04-04T00:00:00.000Z'),
+      },
+    ])
+  }
+
   it('未显式注入 dispatcher 时默认使用 BullMQ dispatcher，而不是 Noop', () => {
     const resolved = resolveVideoWorkerDispatcher()
 
     expect(resolved).toBeInstanceOf(BullMqVideoDispatcher)
+  })
+
+  it('轮询配置保持 5 秒扫描、30 秒单任务间隔和每轮 20 条', () => {
+    expect(VIDEO_SYNC_SCAN_INTERVAL_MS).toBe(5_000)
+    expect(VIDEO_SYNC_POLL_INTERVAL_MS).toBe(30_000)
+    expect(VIDEO_SYNC_SCAN_BATCH_SIZE).toBe(20)
+  })
+
+  it('BullMQ 对同一任务和同一执行时间使用相同 jobId 防重复', async () => {
+    let existingJob: { getState: () => Promise<string>; remove: () => Promise<void> } | null = null
+    const syncQueue = {
+      getJob: vi.fn(async () => existingJob),
+      add: vi.fn(async () => {
+        existingJob = {
+          getState: async () => 'delayed',
+          remove: async () => undefined,
+        }
+        return existingJob
+      }),
+    }
+    const bullDispatcher = new BullMqVideoDispatcher()
+    Object.assign(bullDispatcher as object, { syncQueue })
+    const runAt = new Date('2026-04-04T00:00:30.000Z')
+    const nowSpy = vi.spyOn(Date, 'now').mockReturnValue(new Date('2026-04-04T00:00:00.000Z').getTime())
+
+    try {
+      await bullDispatcher.enqueueSync(88, { runAt })
+      await bullDispatcher.enqueueSync(88, { runAt })
+    } finally {
+      nowSpy.mockRestore()
+    }
+
+    expect(resolveVideoSyncJobId(88, runAt.getTime())).toBe(`video-sync-88-${runAt.getTime()}`)
+    expect(syncQueue.add).toHaveBeenCalledTimes(1)
+    expect(syncQueue.add).toHaveBeenCalledWith(
+      'sync-video-status',
+      { taskId: 88 },
+      expect.objectContaining({
+        jobId: `video-sync-88-${runAt.getTime()}`,
+        delay: 30_000,
+      })
+    )
+  })
+
+  it('数据库兜底扫描一次最多补入 20 个到期任务且不访问上游', async () => {
+    const records = Array.from({ length: 25 }, (_, index) => makeSyncTaskRecord(2000 + index))
+    repository.seed(records)
+
+    await createVideoSyncEnqueuer({
+      repository,
+      dispatcher,
+      now: () => new Date('2026-04-04T00:10:00.000Z'),
+    })()
+
+    expect(repository.syncableCalls).toEqual([
+      { now: new Date('2026-04-04T00:10:00.000Z'), limit: 20 },
+    ])
+    expect(dispatcher.syncCalls).toHaveLength(20)
+    expect(dispatcher.syncCalls).toEqual(
+      records.slice(0, 20).map((record) => ({ taskId: record.id, runAt: record.nextPollAt! }))
+    )
+    expect(repository.updates).toEqual([])
+  })
+
+  it('单任务延迟 job 提前触发时只重排到 nextPollAt，不请求上游', async () => {
+    const nextPollAt = new Date('2026-04-04T00:00:30.000Z')
+    repository.seed([makeSyncTaskRecord(2100, { nextPollAt })])
+    const arkClient: ArkVideoClient = {
+      createTask: vi.fn(),
+      getTask: vi.fn(),
+      listTasks: vi.fn(),
+    }
+
+    await createVideoSyncTaskProcessor({
+      repository,
+      dispatcher,
+      arkClient,
+      now: () => new Date('2026-04-04T00:00:05.000Z'),
+    })({ taskId: 2100 })
+
+    expect(arkClient.listTasks).not.toHaveBeenCalled()
+    expect(repository.updates).toEqual([])
+    expect(dispatcher.syncCalls).toEqual([{ taskId: 2100, runAt: nextPollAt }])
+  })
+
+  it('单任务轮询 processing 后准确安排 30 秒后的延迟 job', async () => {
+    const logRepository = new RecordingVideoLogRepository()
+    repository.seed([makeSyncTaskRecord(2200)])
+    const arkClient: ArkVideoClient = {
+      createTask: vi.fn(),
+      getTask: vi.fn(),
+      listTasks: vi.fn().mockResolvedValue([
+        {
+          id: 'task-2200',
+          status: 'processing',
+          videoUrl: null,
+          completionTokens: null,
+          totalTokens: null,
+          errorMessage: null,
+          createdAt: null,
+          updatedAt: null,
+          executionExpiresAfter: null,
+        },
+      ]),
+    }
+
+    await createVideoSyncTaskProcessor({
+      repository,
+      dispatcher,
+      arkClient,
+      generationLogger: new VideoGenerationLogger(logRepository),
+      now: () => new Date('2026-04-04T00:00:07.000Z'),
+    })({ taskId: 2200 })
+
+    expect(arkClient.listTasks).toHaveBeenCalledWith(['task-2200'])
+    expect(repository.updates).toContainEqual({
+      id: 2200,
+      patch: expect.objectContaining({
+        lastPolledAt: new Date('2026-04-04T00:00:07.000Z'),
+        nextPollAt: new Date('2026-04-04T00:00:37.000Z'),
+      }),
+    })
+    expect(dispatcher.syncCalls).toEqual([
+      { taskId: 2200, runAt: new Date('2026-04-04T00:00:37.000Z') },
+    ])
+    expect(logRepository.writes).toContainEqual(expect.objectContaining({
+      action: 'ark_video.list_tasks',
+      status: 'started',
+      requestPayload: expect.objectContaining({
+        scheduledAt: '2026-04-04T00:00:00.000Z',
+        schedulerLagMs: 7_000,
+      }),
+    }))
+  })
+
+  it('单任务轮询遇到瞬时网络错误时也在 30 秒后重试', async () => {
+    repository.seed([makeSyncTaskRecord(2300)])
+    const arkClient: ArkVideoClient = {
+      createTask: vi.fn(),
+      getTask: vi.fn(),
+      listTasks: vi.fn().mockRejectedValue(new Error('fetch failed')),
+    }
+
+    await createVideoSyncTaskProcessor({
+      repository,
+      dispatcher,
+      arkClient,
+      now: () => new Date('2026-04-04T00:00:09.000Z'),
+    })({ taskId: 2300 })
+
+    expect(repository.updates).toContainEqual({
+      id: 2300,
+      patch: {
+        lastPolledAt: new Date('2026-04-04T00:00:09.000Z'),
+        nextPollAt: new Date('2026-04-04T00:00:39.000Z'),
+      },
+    })
+    expect(dispatcher.syncCalls).toEqual([
+      { taskId: 2300, runAt: new Date('2026-04-04T00:00:39.000Z') },
+    ])
   })
 
   it('create processor 会创建火山任务并先标记为 pending', async () => {
@@ -347,7 +628,9 @@ describe('video.worker', () => {
         },
       },
     ])
-    expect(dispatcher.syncCalls).toEqual([])
+    expect(dispatcher.syncCalls).toEqual([
+      { taskId: 1, runAt: new Date('2026-04-04T00:05:00.000Z') },
+    ])
     expect(logRepository.writes.map((item) => `${item.action}:${item.status}`)).toEqual([
       'video_create.started:info',
       'video_payload.resolve_assets:started',
@@ -917,7 +1200,7 @@ describe('video.worker', () => {
     })
   })
 
-  it('sync processor 成功下载视频到 OSS 并更新 succeeded', async () => {
+  it('sync processor 对 completed 任务写 arkVideoUrl 并入队下载', async () => {
     const arkClient: ArkVideoClient = {
       createTask: vi.fn(),
       getTask: vi.fn(),
@@ -935,15 +1218,6 @@ describe('video.worker', () => {
         },
       ]),
     }
-
-    const fetchImpl = vi.fn().mockResolvedValue(
-      new Response(Buffer.from('video-binary'), {
-        status: 200,
-        headers: {
-          'content-type': 'video/mp4',
-        },
-      })
-    )
 
     repository.seed([
       {
@@ -974,9 +1248,7 @@ describe('video.worker', () => {
     const processor = createVideoSyncProcessor({
       repository,
       dispatcher,
-      ossService,
       arkClient,
-      fetchImpl,
       now: () => new Date('2026-04-04T00:10:00.000Z'),
     })
 
@@ -985,20 +1257,11 @@ describe('video.worker', () => {
     expect(repository.syncableCalls).toEqual([{ now: new Date('2026-04-04T00:10:00.000Z'), limit: 20 }])
     expect(arkClient.listTasks).toHaveBeenCalledWith(['task-4'])
     expect(arkClient.getTask).not.toHaveBeenCalled()
-    expect(fetchImpl).toHaveBeenCalledWith('https://ark.example.com/video.mp4')
-    expect(ossService.putCalls).toEqual([
-      {
-        ossKey: 'videos/task-4.mp4',
-        size: Buffer.byteLength('video-binary'),
-        contentType: 'video/mp4',
-      },
-    ])
     expect(repository.updates).toContainEqual({
       id: 4,
       patch: {
-        status: 'succeeded',
+        status: 'processing',
         arkVideoUrl: 'https://ark.example.com/video.mp4',
-        videoOssKey: 'videos/task-4.mp4',
         completionTokens: 321,
         totalTokens: 654,
         errorMessage: null,
@@ -1008,7 +1271,80 @@ describe('video.worker', () => {
         nextPollAt: null,
       },
     })
-    expect(dispatcher.syncCalls).toEqual([])
+    expect(dispatcher.downloadCalls).toEqual([4])
+    expect(ossService.putCalls).toEqual([])
+  })
+
+  it('sync processor 对 ToAPIs completed 任务写 arkVideoUrl 并入队下载', async () => {
+    const arkClient: ArkVideoClient = {
+      createTask: vi.fn(),
+      getTask: vi.fn(),
+      listTasks: vi.fn().mockResolvedValue([
+        {
+          id: 'task-blocked-host',
+          status: 'succeeded',
+          videoUrl: 'https://files.toapis.com/videos/task-blocked-host/1787641168_abc.mp4',
+          completionTokens: 10,
+          totalTokens: 20,
+          errorMessage: null,
+          createdAt: null,
+          updatedAt: null,
+          executionExpiresAfter: null,
+        },
+      ]),
+    }
+
+    repository.seed([
+      {
+        id: 20,
+        userId: 1,
+        projectId: 101,
+        arkTaskId: 'task-blocked-host',
+        idempotencyKey: 'idem-20',
+        status: 'processing',
+        model: 'seedance-2',
+        prompt: '改写下载域名',
+        promptRaw: '改写下载域名',
+        duration: 5,
+        ratio: '16:9',
+        resolution: '720p',
+        generateAudio: true,
+        providerKey: 'toapis',
+        providerSnapshot: {
+          providerKey: 'toapis',
+          name: 'ToAPIs',
+          providerType: 'toapis',
+          endpoint: 'https://toapis.xyz/v1',
+          capabilities: { version: 1, models: [] },
+        },
+        requestSnapshot: { model: 'seedance-2', content: [] },
+        arkVideoUrl: null,
+        videoOssKey: null,
+        completionTokens: null,
+        totalTokens: null,
+        errorMessage: null,
+        createdAt: new Date('2026-04-04T00:00:00.000Z'),
+        updatedAt: new Date('2026-04-04T00:00:00.000Z'),
+      },
+    ])
+
+    const processor = createVideoSyncProcessor({
+      repository,
+      dispatcher,
+      arkClient,
+      now: () => new Date('2026-04-04T00:10:00.000Z'),
+    })
+
+    await processor()
+
+    expect(repository.updates).toContainEqual({
+      id: 20,
+      patch: expect.objectContaining({
+        arkVideoUrl: 'https://files.toapis.com/videos/task-blocked-host/1787641168_abc.mp4',
+        nextPollAt: null,
+      }),
+    })
+    expect(dispatcher.downloadCalls).toEqual([20])
   })
 
   it('sync processor 在 nextPollAt 未到时不请求火山状态接口', async () => {
@@ -1048,9 +1384,7 @@ describe('video.worker', () => {
     const processor = createVideoSyncProcessor({
       repository,
       dispatcher,
-      ossService,
       arkClient,
-      fetchImpl: vi.fn(),
       now: () => new Date('2026-04-04T00:04:59.000Z'),
     })
 
@@ -1112,9 +1446,7 @@ describe('video.worker', () => {
     const processor = createVideoSyncProcessor({
       repository,
       dispatcher,
-      ossService,
       arkClient,
-      fetchImpl: vi.fn(),
       now: () => new Date('2026-04-04T00:10:00.000Z'),
     })
 
@@ -1123,28 +1455,15 @@ describe('video.worker', () => {
     expect(arkClient.listTasks).toHaveBeenCalledTimes(1)
     expect(arkClient.listTasks).toHaveBeenCalledWith(records.slice(0, 20).map((record) => record.arkTaskId))
     expect(repository.updates).toHaveLength(20)
-    expect(dispatcher.syncCalls).toEqual([])
+    expect(dispatcher.syncCalls).toEqual(
+      records.slice(0, 20).map((record) => ({
+        taskId: record.id,
+        runAt: new Date('2026-04-04T00:10:30.000Z'),
+      }))
+    )
   })
 
-  it('sync processor 在火山成功但 OSS 上传超时时保留火山结果并延迟重试', async () => {
-    const arkClient: ArkVideoClient = {
-      createTask: vi.fn(),
-      getTask: vi.fn(),
-      listTasks: vi.fn().mockResolvedValue([
-        {
-          id: 'task-14',
-          status: 'succeeded',
-          videoUrl: 'https://ark.example.com/task-14.mp4',
-          completionTokens: 14,
-          totalTokens: 28,
-          errorMessage: null,
-          createdAt: null,
-          updatedAt: null,
-          executionExpiresAfter: null,
-        },
-      ]),
-    }
-
+  it('download processor 在 OSS 上传超时时延迟重试', async () => {
     const fetchImpl = vi.fn().mockResolvedValue(
       new Response(Buffer.from('video-14'), {
         status: 200,
@@ -1173,46 +1492,34 @@ describe('video.worker', () => {
         resolution: '720p',
         generateAudio: true,
         requestSnapshot: { model: 'doubao-seedance-2-0-260128', content: [] },
-        arkVideoUrl: null,
+        arkVideoUrl: 'https://ark.example.com/task-14.mp4',
         videoOssKey: null,
-        completionTokens: null,
-        totalTokens: null,
+        completionTokens: 14,
+        totalTokens: 28,
         errorMessage: null,
+        nextPollAt: null,
+        lastArkStatus: 'succeeded',
         createdAt: new Date('2026-04-04T00:00:00.000Z'),
         updatedAt: new Date('2026-04-04T00:00:00.000Z'),
       },
     ])
 
-    const processor = createVideoSyncProcessor({
+    const processor = createVideoDownloadProcessor({
       repository,
-      dispatcher,
       ossService,
-      arkClient,
       fetchImpl,
       now: () => new Date('2026-04-04T00:10:00.000Z'),
     })
 
-    await processor()
+    await processor({ taskId: 14 })
 
-    expect(repository.updates).toContainEqual({
-      id: 14,
-      patch: {
-        status: 'processing',
-        arkVideoUrl: 'https://ark.example.com/task-14.mp4',
-        completionTokens: 14,
-        totalTokens: 28,
-        errorMessage: null,
-        lastPolledAt: new Date('2026-04-04T00:10:00.000Z'),
-        lastArkStatus: 'succeeded',
-        lastArkStatusChangedAt: new Date('2026-04-04T00:10:00.000Z'),
-        nextPollAt: null,
-      },
-    })
     expect(repository.updates).toContainEqual({
       id: 14,
       patch: {
         status: 'processing',
         errorMessage: 'Response timeout for 60000ms, please increase the timeout',
+        downloadClaimedAt: null,
+        downloadClaimToken: null,
         lastPolledAt: new Date('2026-04-04T00:10:00.000Z'),
         nextPollAt: new Date('2026-04-04T00:10:30.000Z'),
       },
@@ -1224,28 +1531,9 @@ describe('video.worker', () => {
         errorMessage: 'Response timeout for 60000ms, please increase the timeout',
       },
     })
-    expect(dispatcher.syncCalls).toEqual([])
   })
 
-  it('sync processor 下载火山视频 403 时写入不可重试失败原因并带火山任务 ID', async () => {
-    const arkClient: ArkVideoClient = {
-      createTask: vi.fn(),
-      getTask: vi.fn(),
-      listTasks: vi.fn().mockResolvedValue([
-        {
-          id: 'task-expired',
-          status: 'succeeded',
-          videoUrl: 'https://ark.example.com/expired.mp4',
-          completionTokens: 11,
-          totalTokens: 22,
-          errorMessage: null,
-          createdAt: null,
-          updatedAt: null,
-          executionExpiresAfter: null,
-        },
-      ]),
-    }
-
+  it('download processor 下载 403 时写入不可重试失败原因并带火山任务 ID', async () => {
     const fetchImpl = vi.fn().mockResolvedValue(new Response(null, { status: 403 }))
 
     repository.seed([
@@ -1264,36 +1552,37 @@ describe('video.worker', () => {
         resolution: '720p',
         generateAudio: true,
         requestSnapshot: { model: 'doubao-seedance-2-0-260128', content: [] },
-        arkVideoUrl: null,
+        arkVideoUrl: 'https://ark.example.com/expired.mp4',
         videoOssKey: null,
-        completionTokens: null,
-        totalTokens: null,
+        completionTokens: 11,
+        totalTokens: 22,
         errorMessage: null,
+        nextPollAt: null,
+        lastArkStatus: 'succeeded',
         createdAt: new Date('2026-04-04T00:00:00.000Z'),
         updatedAt: new Date('2026-04-04T00:00:00.000Z'),
       },
     ])
 
-    const processor = createVideoSyncProcessor({
+    const processor = createVideoDownloadProcessor({
       repository,
-      dispatcher,
       ossService,
-      arkClient,
       fetchImpl,
       now: () => new Date('2026-04-04T00:10:00.000Z'),
     })
 
-    await processor()
+    await processor({ taskId: 15 })
 
     expect(repository.updates).toContainEqual({
       id: 15,
       patch: {
         status: 'failed',
         errorMessage: '火山方舟视频链接已过期或无权限访问，无法下载结果视频（HTTP 403，火山方舟任务ID：task-expired）',
+        downloadClaimedAt: null,
+        downloadClaimToken: null,
         nextPollAt: null,
       },
     })
-    expect(dispatcher.syncCalls).toEqual([])
     expect(ossService.putCalls).toEqual([])
   })
 
@@ -1345,9 +1634,7 @@ describe('video.worker', () => {
     const processor = createVideoSyncProcessor({
       repository,
       dispatcher,
-      ossService,
       arkClient,
-      fetchImpl: vi.fn(),
       now: () => new Date('2026-04-04T00:10:00.000Z'),
     })
 
@@ -1364,7 +1651,9 @@ describe('video.worker', () => {
         nextPollAt: new Date('2026-04-04T00:10:30.000Z'),
       },
     })
-    expect(dispatcher.syncCalls).toEqual([])
+    expect(dispatcher.syncCalls).toEqual([
+      { taskId: 6, runAt: new Date('2026-04-04T00:10:30.000Z') },
+    ])
     expect(arkClient.listTasks).toHaveBeenCalledTimes(1)
     expect(arkClient.getTask).not.toHaveBeenCalled()
   })
@@ -1416,9 +1705,7 @@ describe('video.worker', () => {
     const processor = createVideoSyncProcessor({
       repository,
       dispatcher,
-      ossService,
       arkClient,
-      fetchImpl: vi.fn(),
       now: () => new Date('2026-04-04T00:10:00.000Z'),
     })
 
@@ -1482,9 +1769,7 @@ describe('video.worker', () => {
     const processor = createVideoSyncProcessor({
       repository,
       dispatcher,
-      ossService,
       arkClient,
-      fetchImpl: vi.fn(),
       now: () => new Date('2026-04-04T00:10:00.000Z'),
     })
 
@@ -1580,10 +1865,8 @@ describe('video.worker', () => {
     const processor = createVideoSyncProcessor({
       repository,
       dispatcher,
-      ossService,
       arkClient: healthyClient,
       resolveClient: async (task) => task.id === 18 ? authFailedClient : healthyClient,
-      fetchImpl: vi.fn(),
       now: () => new Date('2026-04-04T00:10:00.000Z'),
     })
 
@@ -1631,15 +1914,6 @@ describe('video.worker', () => {
         },
       ]),
     }
-
-    const fetchImpl = vi.fn().mockResolvedValue(
-      new Response(Buffer.from('video-11'), {
-        status: 200,
-        headers: {
-          'content-type': 'video/mp4',
-        },
-      })
-    )
 
     repository.seed([
       {
@@ -1693,9 +1967,7 @@ describe('video.worker', () => {
     const processor = createVideoSyncProcessor({
       repository,
       dispatcher,
-      ossService,
       arkClient,
-      fetchImpl,
       now: () => new Date('2026-04-04T00:10:00.000Z'),
     })
 
@@ -1717,9 +1989,8 @@ describe('video.worker', () => {
     expect(repository.updates).toContainEqual({
       id: 11,
       patch: {
-        status: 'succeeded',
+        status: 'processing',
         arkVideoUrl: 'https://ark.example.com/task-11.mp4',
-        videoOssKey: 'videos/task-11.mp4',
         completionTokens: 11,
         totalTokens: 22,
         errorMessage: null,
@@ -1729,7 +2000,8 @@ describe('video.worker', () => {
         nextPollAt: null,
       },
     })
-    expect(dispatcher.syncCalls).toEqual([])
+    expect(dispatcher.downloadCalls).toEqual([11])
+    expect(ossService.putCalls).toEqual([])
   })
 
   it('sync processor 对超过 24 小时且火山未返回的任务标记 failed', async () => {
@@ -1769,9 +2041,7 @@ describe('video.worker', () => {
     const processor = createVideoSyncProcessor({
       repository,
       dispatcher,
-      ossService,
       arkClient,
-      fetchImpl: vi.fn(),
       now: () => new Date('2026-04-09T00:00:01.000Z'),
     })
 
@@ -1825,9 +2095,7 @@ describe('video.worker', () => {
     const processor = createVideoSyncProcessor({
       repository,
       dispatcher,
-      ossService,
       arkClient,
-      fetchImpl: vi.fn(),
       now: () => new Date('2026-04-09T00:00:00.000Z'),
     })
 
@@ -1840,7 +2108,9 @@ describe('video.worker', () => {
         nextPollAt: new Date('2026-04-09T00:00:30.000Z'),
       },
     })
-    expect(dispatcher.syncCalls).toEqual([])
+    expect(dispatcher.syncCalls).toEqual([
+      { taskId: 13, runAt: new Date('2026-04-09T00:00:30.000Z') },
+    ])
   })
 
   it('reconcile processor 不再把已有 arkTaskId 的任务重新入同步队列', async () => {
@@ -1883,5 +2153,449 @@ describe('video.worker', () => {
 
     expect(dispatcher.syncCalls).toEqual([])
     expect(dispatcher.createIds).toEqual([])
+  })
+
+  it('download processor 成功下载视频到 OSS 并更新 succeeded', async () => {
+    const fetchImpl = vi.fn().mockResolvedValue(
+      new Response(Buffer.from('video-binary'), {
+        status: 200,
+        headers: {
+          'content-type': 'video/mp4',
+        },
+      })
+    )
+
+    repository.seed([
+      {
+        id: 4,
+        userId: 1,
+        projectId: 101,
+        arkTaskId: 'task-4',
+        idempotencyKey: 'idem-4',
+        status: 'processing',
+        model: 'doubao-seedance-2-0-260128',
+        prompt: '同步成功',
+        promptRaw: '同步成功',
+        duration: 5,
+        ratio: '16:9',
+        resolution: '720p',
+        generateAudio: true,
+        requestSnapshot: { model: 'doubao-seedance-2-0-260128', content: [] },
+        arkVideoUrl: 'https://ark.example.com/video.mp4',
+        videoOssKey: null,
+        completionTokens: 321,
+        totalTokens: 654,
+        errorMessage: null,
+        nextPollAt: null,
+        lastArkStatus: 'succeeded',
+        createdAt: new Date('2026-04-04T00:00:00.000Z'),
+        updatedAt: new Date('2026-04-04T00:00:00.000Z'),
+      },
+    ])
+
+    const processor = createVideoDownloadProcessor({
+      repository,
+      ossService,
+      fetchImpl,
+      now: () => new Date('2026-04-04T00:10:00.000Z'),
+    })
+
+    await processor({ taskId: 4 })
+
+    expect(fetchImpl).toHaveBeenCalledWith(
+      'https://ark.example.com/video.mp4',
+      expect.objectContaining({ signal: expect.any(AbortSignal) })
+    )
+    expect(ossService.putCalls).toEqual([
+      {
+        ossKey: 'videos/task-4.mp4',
+        size: Buffer.byteLength('video-binary'),
+        contentType: 'video/mp4',
+      },
+    ])
+    expect(repository.updates).toContainEqual({
+      id: 4,
+      patch: {
+        status: 'succeeded',
+        videoOssKey: 'videos/task-4.mp4',
+        errorMessage: null,
+        downloadClaimedAt: null,
+        downloadClaimToken: null,
+        lastPolledAt: new Date('2026-04-04T00:10:00.000Z'),
+        nextPollAt: null,
+      },
+    })
+  })
+
+  it('download processor 优先将 files.toapis.com 结果改为 files.toapis.cn 直连', async () => {
+    const fetchImpl = vi.fn().mockResolvedValue(
+      new Response(Buffer.from('video-binary'), {
+        status: 200,
+        headers: { 'content-type': 'video/mp4' },
+      })
+    )
+
+    repository.seed([
+      {
+        id: 20,
+        userId: 1,
+        projectId: 101,
+        arkTaskId: 'task-blocked-host',
+        idempotencyKey: 'idem-20',
+        status: 'processing',
+        model: 'seedance-2',
+        prompt: '改写下载域名',
+        promptRaw: '改写下载域名',
+        duration: 5,
+        ratio: '16:9',
+        resolution: '720p',
+        generateAudio: true,
+        providerKey: 'toapis',
+        providerSnapshot: {
+          providerKey: 'toapis',
+          name: 'ToAPIs',
+          providerType: 'toapis',
+          endpoint: 'https://toapis.xyz/v1',
+          capabilities: { version: 1, models: [] },
+        },
+        requestSnapshot: { model: 'seedance-2', content: [] },
+        arkVideoUrl: 'https://files.toapis.com/videos/task-blocked-host/1787641168_abc.mp4',
+        videoOssKey: null,
+        completionTokens: 10,
+        totalTokens: 20,
+        errorMessage: null,
+        nextPollAt: null,
+        lastArkStatus: 'succeeded',
+        createdAt: new Date('2026-04-04T00:00:00.000Z'),
+        updatedAt: new Date('2026-04-04T00:00:00.000Z'),
+      },
+    ])
+
+    const processor = createVideoDownloadProcessor({
+      repository,
+      ossService,
+      fetchImpl,
+      now: () => new Date('2026-04-04T00:10:00.000Z'),
+    })
+
+    await processor({ taskId: 20 })
+
+    expect(fetchImpl).toHaveBeenCalledWith(
+      'https://files.toapis.cn/videos/task-blocked-host/1787641168_abc.mp4',
+      expect.objectContaining({ signal: expect.any(AbortSignal) })
+    )
+    expect(ossService.putCalls).toEqual([
+      {
+        ossKey: 'videos/task-blocked-host.mp4',
+        size: Buffer.byteLength('video-binary'),
+        contentType: 'video/mp4',
+      },
+    ])
+  })
+
+  it('download processor 直连成功时不访问 ToAPIs 代理路径', async () => {
+    const fetchImpl = vi.fn().mockResolvedValue(
+      new Response(Buffer.from('video-direct'), {
+        status: 200,
+        headers: { 'content-type': 'video/mp4' },
+      })
+    )
+    seedToapisDownloadTask(25, 'https://files.toapis.cn/videos/task-toapis-25/direct.mp4?sig=abc')
+
+    await createVideoDownloadProcessor({ repository, ossService, fetchImpl })({ taskId: 25 })
+
+    expect(fetchImpl).toHaveBeenCalledTimes(1)
+    expect(fetchImpl).toHaveBeenCalledWith(
+      'https://files.toapis.cn/videos/task-toapis-25/direct.mp4?sig=abc',
+      expect.objectContaining({ signal: expect.any(AbortSignal) })
+    )
+    expect(ossService.putCalls).toHaveLength(1)
+  })
+
+  it.each([478, 503])('download processor 直连返回 %i 时回退到 ToAPIs 代理路径', async (status) => {
+    const fetchImpl = vi
+      .fn()
+      .mockResolvedValueOnce(new Response(null, { status }))
+      .mockResolvedValueOnce(new Response(Buffer.from('video-proxy'), {
+        status: 200,
+        headers: { 'content-type': 'video/mp4' },
+      }))
+    const logRepository = new RecordingVideoLogRepository()
+    seedToapisDownloadTask(26, 'https://files.toapis.cn/videos/task-toapis-26/fallback.mp4')
+
+    await createVideoDownloadProcessor({
+      repository,
+      ossService,
+      fetchImpl,
+      generationLogger: new VideoGenerationLogger(logRepository),
+    })({ taskId: 26 })
+
+    expect(fetchImpl).toHaveBeenNthCalledWith(
+      1,
+      'https://files.toapis.cn/videos/task-toapis-26/fallback.mp4',
+      expect.objectContaining({ signal: expect.any(AbortSignal) })
+    )
+    expect(fetchImpl).toHaveBeenNthCalledWith(
+      2,
+      'https://toapis.xyz/__files/videos/task-toapis-26/fallback.mp4',
+      expect.objectContaining({ signal: expect.any(AbortSignal) })
+    )
+    expect(ossService.putCalls).toHaveLength(1)
+    expect(repository.updates).toContainEqual({
+      id: 26,
+      patch: expect.objectContaining({ status: 'succeeded', videoOssKey: 'videos/task-toapis-26.mp4' }),
+    })
+    expect(logRepository.writes).toContainEqual(expect.objectContaining({
+      action: 'video_result.download_fallback',
+      status: 'info',
+      requestPayload: expect.objectContaining({
+        fromUrl: 'https://files.toapis.cn/videos/task-toapis-26/fallback.mp4',
+        toUrl: 'https://toapis.xyz/__files/videos/task-toapis-26/fallback.mp4',
+        status,
+      }),
+    }))
+  })
+
+  it('download processor 直连传输失败时回退到 ToAPIs 代理路径', async () => {
+    const fetchImpl = vi
+      .fn()
+      .mockRejectedValueOnce(new Error('fetch failed'))
+      .mockResolvedValueOnce(new Response(Buffer.from('video-proxy-error-recovery'), {
+        status: 200,
+        headers: { 'content-type': 'video/mp4' },
+      }))
+    seedToapisDownloadTask(27, 'https://files.toapis.com/videos/task-toapis-27/fallback.mp4')
+
+    await createVideoDownloadProcessor({ repository, ossService, fetchImpl })({ taskId: 27 })
+
+    expect(fetchImpl).toHaveBeenCalledTimes(2)
+    expect(fetchImpl).toHaveBeenNthCalledWith(
+      1,
+      'https://files.toapis.cn/videos/task-toapis-27/fallback.mp4',
+      expect.objectContaining({ signal: expect.any(AbortSignal) })
+    )
+    expect(fetchImpl).toHaveBeenNthCalledWith(
+      2,
+      'https://toapis.xyz/__files/videos/task-toapis-27/fallback.mp4',
+      expect.objectContaining({ signal: expect.any(AbortSignal) })
+    )
+    expect(repository.updates).toContainEqual({
+      id: 27,
+      patch: expect.objectContaining({ status: 'succeeded' }),
+    })
+  })
+
+  it('download processor 直连返回 403 或 404 时不回退代理', async () => {
+    for (const [id, status] of [[28, 403], [29, 404]] as const) {
+      const fetchImpl = vi.fn().mockResolvedValue(new Response(null, { status }))
+      seedToapisDownloadTask(id, `https://files.toapis.cn/videos/task-toapis-${id}/terminal.mp4`)
+
+      await createVideoDownloadProcessor({ repository, ossService, fetchImpl })({ taskId: id })
+
+      expect(fetchImpl).toHaveBeenCalledTimes(1)
+      expect(repository.updates).toContainEqual({
+        id,
+        patch: expect.objectContaining({ status: 'failed', nextPollAt: null }),
+      })
+    }
+  })
+
+  it('download processor 跳过已有 videoOssKey 的任务', async () => {
+    const fetchImpl = vi.fn()
+
+    repository.seed([
+      {
+        id: 21,
+        userId: 1,
+        projectId: 101,
+        arkTaskId: 'task-done',
+        idempotencyKey: 'idem-21',
+        status: 'succeeded',
+        model: 'doubao-seedance-2-0-260128',
+        prompt: '已完成',
+        promptRaw: '已完成',
+        duration: 5,
+        ratio: '16:9',
+        resolution: '720p',
+        generateAudio: true,
+        requestSnapshot: { model: 'doubao-seedance-2-0-260128', content: [] },
+        arkVideoUrl: 'https://ark.example.com/done.mp4',
+        videoOssKey: 'videos/task-done.mp4',
+        completionTokens: 1,
+        totalTokens: 2,
+        errorMessage: null,
+        nextPollAt: null,
+        lastArkStatus: 'succeeded',
+        createdAt: new Date('2026-04-04T00:00:00.000Z'),
+        updatedAt: new Date('2026-04-04T00:00:00.000Z'),
+      },
+    ])
+
+    const processor = createVideoDownloadProcessor({
+      repository,
+      ossService,
+      fetchImpl,
+      now: () => new Date('2026-04-04T00:10:00.000Z'),
+    })
+
+    await processor({ taskId: 21 })
+
+    expect(fetchImpl).not.toHaveBeenCalled()
+    expect(ossService.putCalls).toEqual([])
+    expect(repository.updates).toEqual([])
+  })
+
+  it('download processor 对同一任务只允许一个下载租约', async () => {
+    repository.seed([
+      {
+        id: 22,
+        userId: 1,
+        projectId: 101,
+        arkTaskId: 'task-claimed',
+        idempotencyKey: 'idem-22',
+        status: 'processing',
+        model: 'doubao-seedance-2-0-260128',
+        prompt: '租约去重',
+        promptRaw: '租约去重',
+        duration: 5,
+        ratio: '16:9',
+        resolution: '720p',
+        generateAudio: true,
+        requestSnapshot: { model: 'doubao-seedance-2-0-260128', content: [] },
+        arkVideoUrl: 'https://ark.example.com/claimed.mp4',
+        videoOssKey: null,
+        completionTokens: null,
+        totalTokens: null,
+        errorMessage: null,
+        nextPollAt: new Date('2026-04-04T00:10:00.000Z'),
+        lastArkStatus: 'succeeded',
+        createdAt: new Date('2026-04-04T00:00:00.000Z'),
+        updatedAt: new Date('2026-04-04T00:00:00.000Z'),
+      },
+    ])
+
+    const first = await repository.claimDownload(22)
+    const second = await repository.claimDownload(22)
+
+    expect(first).toBe('claim-22')
+    expect(second).toBeNull()
+  })
+
+  it('旧下载租约不能把已成功任务改回 processing', async () => {
+    repository.seed([
+      {
+        id: 24,
+        userId: 1,
+        projectId: 101,
+        arkTaskId: 'task-stale-claim',
+        idempotencyKey: 'idem-24',
+        status: 'processing',
+        model: 'doubao-seedance-2-0-260128',
+        prompt: '旧租约',
+        promptRaw: '旧租约',
+        duration: 5,
+        ratio: '16:9',
+        resolution: '720p',
+        generateAudio: true,
+        requestSnapshot: { model: 'doubao-seedance-2-0-260128', content: [] },
+        arkVideoUrl: 'https://ark.example.com/stale.mp4',
+        videoOssKey: null,
+        completionTokens: null,
+        totalTokens: null,
+        errorMessage: null,
+        nextPollAt: null,
+        lastArkStatus: 'succeeded',
+        createdAt: new Date('2026-04-04T00:00:00.000Z'),
+        updatedAt: new Date('2026-04-04T00:00:00.000Z'),
+      },
+    ])
+
+    const claim = await repository.claimDownload(24)
+    expect(claim).toBe('claim-24')
+    await repository.updateDownloadState(24, claim!, {
+      status: 'succeeded',
+      videoOssKey: 'videos/task-stale-claim.mp4',
+      downloadClaimedAt: null,
+      downloadClaimToken: null,
+      nextPollAt: null,
+    })
+
+    const staleUpdate = await repository.updateDownloadState(24, claim!, {
+      status: 'processing',
+      errorMessage: 'late timeout',
+      downloadClaimedAt: null,
+      downloadClaimToken: null,
+      nextPollAt: new Date(),
+    })
+
+    expect(staleUpdate).toBeNull()
+    expect((await repository.findById(24))?.status).toBe('succeeded')
+  })
+
+  it('download processor 将响应流直接传给 OSS 上传', async () => {
+    const streamedChunks: Buffer[] = []
+    const streamingOssService = {
+      async getSignedUrl() { return 'https://signed.example.com/video.mp4' },
+      async deleteObject() {},
+      async putObject() { throw new Error('不应走 Buffer 上传') },
+      async putObjectStream(_ossKey: string, data: NodeJS.ReadableStream) {
+        for await (const chunk of data) {
+          streamedChunks.push(Buffer.from(chunk))
+        }
+      },
+      async getStsCredentials() {
+        return {
+          credentials: { accessKeyId: 'sts-ak', accessKeySecret: 'sts-sk', securityToken: 'sts-token', expiration: '2026-04-04T12:00:00.000Z' },
+          bucket: 'narrix-assets',
+          region: 'oss-cn-shanghai',
+          keyPrefix: 'assets/',
+        }
+      },
+    } satisfies OssServiceContract
+    const fetchImpl = vi.fn().mockResolvedValue(new Response(Buffer.from('streamed-video'), {
+      status: 200,
+      headers: { 'content-type': 'video/mp4' },
+    }))
+
+    repository.seed([
+      {
+        id: 23,
+        userId: 1,
+        projectId: 101,
+        arkTaskId: 'task-streamed',
+        idempotencyKey: 'idem-23',
+        status: 'processing',
+        model: 'doubao-seedance-2-0-260128',
+        prompt: '流式下载',
+        promptRaw: '流式下载',
+        duration: 5,
+        ratio: '16:9',
+        resolution: '720p',
+        generateAudio: true,
+        requestSnapshot: { model: 'doubao-seedance-2-0-260128', content: [] },
+        arkVideoUrl: 'https://ark.example.com/streamed.mp4',
+        videoOssKey: null,
+        completionTokens: null,
+        totalTokens: null,
+        errorMessage: null,
+        nextPollAt: null,
+        lastArkStatus: 'succeeded',
+        createdAt: new Date('2026-04-04T00:00:00.000Z'),
+        updatedAt: new Date('2026-04-04T00:00:00.000Z'),
+      },
+    ])
+
+    await createVideoDownloadProcessor({
+      repository,
+      ossService: streamingOssService,
+      fetchImpl,
+      now: () => new Date('2026-04-04T00:10:00.000Z'),
+    })({ taskId: 23 })
+
+    expect(Buffer.concat(streamedChunks).toString()).toBe('streamed-video')
+    expect(repository.updates).toContainEqual({
+      id: 23,
+      patch: expect.objectContaining({ status: 'succeeded', videoOssKey: 'videos/task-streamed.mp4' }),
+    })
   })
 })

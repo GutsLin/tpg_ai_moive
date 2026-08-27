@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { Readable } from 'node:stream'
 
 import { ConfigService, type ConfigStore, type StoredConfigEntry } from '../../backend/src/services/config.service'
 import { OssService } from '../../backend/src/services/oss.service'
@@ -7,6 +8,7 @@ const ossConstructorCalls: any[] = []
 const ossInstances: Array<{
   signatureUrl: ReturnType<typeof vi.fn>
   put: ReturnType<typeof vi.fn>
+  putStream: ReturnType<typeof vi.fn>
   delete: ReturnType<typeof vi.fn>
 }> = []
 
@@ -16,6 +18,7 @@ vi.mock('ali-oss', () => ({
     const instance = {
       signatureUrl: vi.fn().mockReturnValue('https://public.example.com/signed'),
       put: vi.fn().mockResolvedValue({}),
+      putStream: vi.fn().mockResolvedValue({}),
       delete: vi.fn().mockResolvedValue({}),
     }
     ossInstances.push(instance)
@@ -126,6 +129,21 @@ describe('OssService', () => {
       internal: true,
       timeout: 300_000,
       retryMax: 3,
+    })
+  })
+
+  it('流式上传调用 putStream，并使用更长的服务端传输超时', async () => {
+    const service = createService()
+    const stream = Readable.from([Buffer.from('video')])
+
+    await service.putObjectStream('videos/streamed.mp4', stream, 'video/mp4')
+
+    expect(ossConstructorCalls[0]).toMatchObject({
+      timeout: 20 * 60_000,
+      retryMax: 3,
+    })
+    expect(ossInstances[0].putStream).toHaveBeenCalledWith('videos/streamed.mp4', stream, {
+      headers: { 'Content-Type': 'video/mp4' },
     })
   })
 })

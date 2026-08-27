@@ -4,6 +4,24 @@ const isValidArkDefaultGroupId = (value: string) => /^group-[^-]+-.+$/.test(valu
 const isBooleanString = (value: string) => value === 'true' || value === 'false'
 const isArkProjectNameMode = (value: string) => value === 'project_code' || value === 'default_value'
 
+const videoReferenceLimitKeys = ['video_reference_image_limit', 'video_reference_video_limit', 'video_reference_audio_limit'] as const
+const videoReferenceLimitMaxValues: Record<(typeof videoReferenceLimitKeys)[number], number> = {
+  video_reference_image_limit: 30,
+  video_reference_video_limit: 10,
+  video_reference_audio_limit: 10,
+}
+const isVideoReferenceLimitKey = (key: string): key is (typeof videoReferenceLimitKeys)[number] =>
+  (videoReferenceLimitKeys as readonly string[]).includes(key)
+const isValidVideoReferenceLimit = (key: (typeof videoReferenceLimitKeys)[number], value: string) => {
+  const parsed = Number.parseInt(value, 10)
+  return (
+    Number.isInteger(parsed) &&
+    parsed >= 1 &&
+    parsed <= videoReferenceLimitMaxValues[key] &&
+    String(parsed) === value.trim()
+  )
+}
+
 export const updateConfigSchema = z.object({
   items: z.array(
     z
@@ -43,6 +61,14 @@ export const updateConfigSchema = z.object({
             message: 'ark_project_name_mode 仅支持 project_code 或 default_value',
           })
         }
+
+        if (isVideoReferenceLimitKey(item.key) && !isValidVideoReferenceLimit(item.key, item.value)) {
+          ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            path: ['value'],
+            message: `${item.key} 仅支持 1-${videoReferenceLimitMaxValues[item.key]} 之间的整数`,
+          })
+        }
       })
   ),
 })
@@ -70,6 +96,11 @@ const videoProviderCapabilitiesSchema = z.object({
       firstLastFrame: z.boolean(), referenceImage: z.boolean(), referenceVideo: z.boolean(), referenceAudio: z.boolean(),
       audioOnlyReference: z.boolean().optional(), generateAudio: z.boolean(), outputFormat: z.boolean().optional(),
     }),
+    referenceLimits: z.object({
+      image: z.number().int().min(1).max(30),
+      video: z.number().int().min(1).max(10),
+      audio: z.number().int().min(1).max(10),
+    }).optional(),
   })).min(1),
 })
 

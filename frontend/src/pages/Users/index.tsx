@@ -1,5 +1,5 @@
 import { Button, Card, Form, Input, Modal, Popconfirm, Select, Space, Table, Tag, Typography, message } from 'antd'
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 
 import { getProjects, type ProjectItem, type ProjectRole } from '../../api/projects'
 import {
@@ -11,8 +11,10 @@ import {
   type UpdateUserPayload,
   type UserItem,
 } from '../../api/users'
+import { exportUserApiKeysCsv, importUserApiKeysCsv } from '../../api/user-api-keys'
 import { PageHeader } from '../../components/PageHeader'
 import { useAuth } from '../../stores/auth'
+import { ApiKeyModal } from './ApiKeyModal'
 
 const panelStyle = {
   borderRadius: 24,
@@ -54,9 +56,16 @@ export const UsersPage = () => {
   const [projects, setProjects] = useState<ProjectItem[]>([])
   const [loading, setLoading] = useState(false)
   const [statusFilter, setStatusFilter] = useState<number | undefined>(1)
+  const [page, setPage] = useState(1)
+  const [total, setTotal] = useState(0)
+  const pageSize = 10
   const [submitting, setSubmitting] = useState(false)
   const [userModalOpen, setUserModalOpen] = useState(false)
   const [editingUser, setEditingUser] = useState<UserItem | null>(null)
+  const [apiKeyModalUser, setApiKeyModalUser] = useState<UserItem | null>(null)
+  const [exportingKeys, setExportingKeys] = useState(false)
+  const [importingKeys, setImportingKeys] = useState(false)
+  const importFileRef = useRef<HTMLInputElement | null>(null)
   const [messageApi, contextHolder] = message.useMessage()
   const [userForm] = Form.useForm<
     CreateUserPayload &
@@ -73,10 +82,11 @@ export const UsersPage = () => {
     setLoading(true)
     try {
       const [userResult, projectResult] = await Promise.all([
-        getUsers({ page: 1, pageSize: 50, status: statusFilter }),
+        getUsers({ page, pageSize, status: statusFilter }),
         getProjects(),
       ])
       setUsers(userResult.items)
+      setTotal(userResult.total)
       setProjects(projectResult.items)
     } catch {
       void messageApi.error('加载用户授权数据失败')
@@ -86,8 +96,12 @@ export const UsersPage = () => {
   }
 
   useEffect(() => {
-    void loadData()
+    setPage(1)
   }, [statusFilter])
+
+  useEffect(() => {
+    void loadData()
+  }, [statusFilter, page])
 
   const projectOptions = useMemo(
     () =>
@@ -228,6 +242,50 @@ export const UsersPage = () => {
     }
   }
 
+  const handleExportApiKeys = async () => {
+    setExportingKeys(true)
+    try {
+      const blob = await exportUserApiKeysCsv()
+      if (!(blob instanceof Blob) || blob.size === 0) {
+        throw new Error('导出文件为空')
+      }
+      const url = URL.createObjectURL(blob)
+      const anchor = document.createElement('a')
+      anchor.href = url
+      const shanghaiDate = new Date(Date.now() + 8 * 60 * 60 * 1000)
+        .toISOString()
+        .slice(0, 10)
+        .replace(/-/g, '')
+      anchor.download = `用户API_Key导出_${shanghaiDate}.csv`
+      document.body.appendChild(anchor)
+      anchor.click()
+      anchor.remove()
+      URL.revokeObjectURL(url)
+      void messageApi.success('CSV 导出成功，可在文件中填写 API Key 后导入')
+    } catch (error: any) {
+      void messageApi.error(error?.response?.data?.message ?? '导出失败')
+    } finally {
+      setExportingKeys(false)
+    }
+  }
+
+  const handleImportApiKeys = async (file: File) => {
+    setImportingKeys(true)
+    try {
+      const csvText = await file.text()
+      const result = await importUserApiKeysCsv(csvText)
+      const errorLines = result.errors.length > 0 ? `\n${result.errors.join('\n')}` : ''
+      void messageApi.success(`导入完成：成功 ${result.imported} 条，跳过 ${result.skipped} 条${errorLines}`)
+    } catch (error: any) {
+      void messageApi.error(error?.response?.data?.message ?? '导入失败')
+    } finally {
+      setImportingKeys(false)
+      if (importFileRef.current) {
+        importFileRef.current.value = ''
+      }
+    }
+  }
+
   return (
     <>
       {contextHolder}
@@ -236,9 +294,20 @@ export const UsersPage = () => {
           title="用户授权"
           description="这里维护平台角色、菜单权限和项目授权。项目台账与成员设置已整合到主菜单里的项目管理。"
           actions={
-            <Button type="primary" onClick={openCreateUserModal}>
-              新建用户
-            </Button>
+            <Space>
+              <Button loading={exportingKeys} onClick={() => void handleExportApiKeys()}>
+                导出 API Key
+              </Button>
+              <Button
+                loading={importingKeys}
+                onClick={() => importFileRef.current?.click()}
+              >
+                导入 API Key
+              </Button>
+              <Button type="primary" onClick={openCreateUserModal}>
+                新建用户
+              </Button>
+            </Space>
           }
         />
 
@@ -264,7 +333,14 @@ export const UsersPage = () => {
             <Table<UserItem>
               rowKey="id"
               loading={loading}
-              pagination={false}
+              pagination={{
+                current: page,
+                pageSize,
+                total,
+                showSizeChanger: false,
+                showTotal: (t) => `共 ${t} 条`,
+                onChange: (p) => setPage(p),
+              }}
               dataSource={users}
               columns={[
                 { title: '用户名', dataIndex: 'username' },
@@ -312,6 +388,7 @@ export const UsersPage = () => {
                   render: (_value: unknown, record) => (
                     <Space>
                       <Button onClick={() => openEditUserModal(record)}>编辑</Button>
+                      <Button onClick={() => setApiKeyModalUser(record)}>API Key</Button>
                       <Popconfirm
                         title="删除用户"
                         description={`确认删除「${record.username}」？该操作会做软删除。`}
@@ -460,6 +537,26 @@ export const UsersPage = () => {
           </Card>
         </Form>
       </Modal>
+
+      <ApiKeyModal
+        open={apiKeyModalUser !== null}
+        userId={apiKeyModalUser?.id ?? null}
+        username={apiKeyModalUser?.username ?? ''}
+        onClose={() => setApiKeyModalUser(null)}
+      />
+
+      <input
+        ref={importFileRef}
+        type="file"
+        accept=".csv,text/csv"
+        style={{ display: 'none' }}
+        onChange={(event) => {
+          const file = event.target.files?.[0]
+          if (file) {
+            void handleImportApiKeys(file)
+          }
+        }}
+      />
     </>
   )
 }

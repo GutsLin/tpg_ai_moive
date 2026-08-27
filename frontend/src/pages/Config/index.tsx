@@ -1,13 +1,13 @@
 import { UploadOutlined } from '@ant-design/icons'
-import { Button, Card, Form, Input, Radio, Select, Space, Switch, Typography, message } from 'antd'
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { Button, Card, Form, Input, InputNumber, Radio, Select, Space, Switch, Typography, message } from 'antd'
+import { useEffect, useRef, useState } from 'react'
 
 import {
-  createConfigArkAssetGroup,
   getConfigItems,
-  listConfigArkAssetGroups,
+  getApiKeyMode,
+  setApiKeyMode,
   updateConfigItems,
-  type ConfigArkAssetGroupItem,
+  type ApiKeyMode,
   type ConfigItem,
 } from '../../api/config'
 import { activateVideoProvider, createVideoProvider, getVideoProviders, updateVideoProvider, type VideoProviderAdmin } from '../../api/video-providers'
@@ -16,29 +16,17 @@ import { PageHeader } from '../../components/PageHeader'
 import { useBrand } from '../../stores/brand'
 import { uploadFileToOss } from '../../utils/oss-upload'
 
-const secretKeys = new Set(['ark_api_key', 'ark_access_key', 'ark_secret_key', 'oss_access_key_id', 'oss_access_key_secret'])
+const secretKeys = new Set(['oss_access_key_id', 'oss_access_key_secret'])
 const brandKeys = new Set(['system_name', 'system_logo_key'])
-const arkKeys = new Set([
-  'ark_api_key',
-  'ark_access_key',
-  'ark_secret_key',
-  'ark_endpoint',
-  'ark_default_group_id',
-  'ark_default_sync_enabled',
-  'ark_project_name_mode',
-  'ark_project_name_default_value',
-])
+const videoLimitKeys = new Set(['video_reference_image_limit', 'video_reference_video_limit', 'video_reference_audio_limit'])
+const videoLimitMaxValues: Record<string, number> = {
+  video_reference_image_limit: 30,
+  video_reference_video_limit: 10,
+  video_reference_audio_limit: 10,
+}
 const labels: Record<string, string> = {
   system_name: '系统名称',
   system_logo_key: '系统 Logo',
-  ark_api_key: '火山 Bearer Token',
-  ark_access_key: '火山素材 Access Key',
-  ark_secret_key: '火山素材 Secret Key',
-  ark_endpoint: '火山视频 Endpoint',
-  ark_default_group_id: '默认素材组',
-  ark_default_sync_enabled: '默认同步策略',
-  ark_project_name_mode: '火山素材 ProjectName 来源',
-  ark_project_name_default_value: 'ProjectName 默认值',
   oss_access_key_id: 'OSS Access Key ID',
   oss_access_key_secret: 'OSS Access Key Secret',
   oss_sts_role_arn: 'OSS STS Role ARN',
@@ -46,32 +34,34 @@ const labels: Record<string, string> = {
   oss_region: 'OSS Region',
   oss_server_internal_enabled: '服务端 OSS 访问网络',
   oss_signed_url_ttl: '签名 URL TTL',
+  video_reference_image_limit: '参考图片上限',
+  video_reference_video_limit: '参考视频上限',
+  video_reference_audio_limit: '参考音频上限',
 }
 
-type ConfigFormValues = Record<string, string | boolean | undefined>
-type ArkGroupMode = 'existing' | 'create'
+type ConfigFormValues = Record<string, string | number | boolean | undefined>
 type RuntimeInfo = Pick<SetupStatus, 'version' | 'environment'>
-type ArkProjectNameMode = 'project_code' | 'default_value'
 type VideoProviderDraft = { providerKey: string; name: string; providerType: 'toapis' | 'volcano_ark'; endpoint: string; apiKey: string }
 
 const emptyVideoProviderDraft = (): VideoProviderDraft => ({
   providerKey: '', name: '', providerType: 'toapis', endpoint: 'https://toapis.com', apiKey: '',
 })
 
-const normalizeConfigFormValue = (item: ConfigItem): string | boolean => {
-  if (item.key === 'ark_default_sync_enabled') {
-    return item.value !== 'false'
-  }
-
+const normalizeConfigFormValue = (item: ConfigItem): string | number | boolean => {
   if (item.key === 'oss_server_internal_enabled') {
     return item.value === 'true'
+  }
+
+  if (videoLimitKeys.has(item.key)) {
+    const parsed = Number.parseInt(item.value, 10)
+    return Number.isInteger(parsed) ? parsed : Number.NaN
   }
 
   return item.value
 }
 
-const normalizeConfigSubmitValue = (item: ConfigItem, value: string | boolean): string => {
-  if (item.key === 'ark_default_sync_enabled' || item.key === 'oss_server_internal_enabled') {
+const normalizeConfigSubmitValue = (item: ConfigItem, value: string | number | boolean): string => {
+  if (item.key === 'oss_server_internal_enabled') {
     return String(Boolean(value))
   }
 
@@ -81,8 +71,6 @@ const normalizeConfigSubmitValue = (item: ConfigItem, value: string | boolean): 
 const buildConfigRules = (item: ConfigItem) => {
   if (
     item.key === 'system_logo_key' ||
-    item.key === 'ark_default_group_id' ||
-    item.key === 'ark_default_sync_enabled' ||
     item.key === 'oss_server_internal_enabled'
   ) {
     return []
@@ -120,11 +108,6 @@ export const ConfigPage = () => {
   const [items, setItems] = useState<ConfigItem[]>([])
   const [loading, setLoading] = useState(false)
   const [saving, setSaving] = useState(false)
-  const [arkGroups, setArkGroups] = useState<ConfigArkAssetGroupItem[]>([])
-  const [arkGroupMode, setArkGroupMode] = useState<ArkGroupMode>('existing')
-  const [arkGroupsLoaded, setArkGroupsLoaded] = useState(false)
-  const [arkGroupsLoading, setArkGroupsLoading] = useState(false)
-  const [creatingArkGroup, setCreatingArkGroup] = useState(false)
   const [uploadingLogo, setUploadingLogo] = useState(false)
   const [pendingLogoPreviewUrl, setPendingLogoPreviewUrl] = useState<string | null>(null)
   const [runtimeInfo, setRuntimeInfo] = useState<RuntimeInfo | null>(null)
@@ -132,6 +115,8 @@ export const ConfigPage = () => {
   const [selectedVideoProviderId, setSelectedVideoProviderId] = useState<number | null>(null)
   const [videoProviderDraft, setVideoProviderDraft] = useState<VideoProviderDraft>(emptyVideoProviderDraft)
   const [videoProviderSaving, setVideoProviderSaving] = useState(false)
+  const [apiKeyMode, setApiKeyModeState] = useState<ApiKeyMode>('global')
+  const [apiKeyModeSaving, setApiKeyModeSaving] = useState(false)
   const logoUploadTaskRef = useRef<Promise<void> | null>(null)
   const logoInputRef = useRef<HTMLInputElement | null>(null)
   const pendingLogoPreviewUrlRef = useRef<string | null>(null)
@@ -173,6 +158,9 @@ export const ConfigPage = () => {
             return accumulator
           }, {})
         )
+        const modeResult = await getApiKeyMode().catch(() => ({ mode: 'global' as const }))
+        if (!mounted) return
+        setApiKeyModeState(modeResult.mode)
       } finally {
         if (mounted) {
           setLoading(false)
@@ -195,96 +183,10 @@ export const ConfigPage = () => {
     }
   }, [])
 
-  const itemMap = useMemo(() => new Map(items.map((item) => [item.key, item])), [items])
-  const groupedItems = useMemo(
-    () => ({
-      brand: items.filter((item) => brandKeys.has(item.key)),
-      ark: items.filter((item) => arkKeys.has(item.key)),
-      oss: items.filter((item) => item.key.startsWith('oss_')),
-    }),
-    [items]
-  )
-  const watchedDefaultGroupId = Form.useWatch('ark_default_group_id', form)
-  const watchedProjectNameMode =
-    (Form.useWatch('ark_project_name_mode', form) as ArkProjectNameMode | undefined) ?? 'project_code'
-  const selectedArkGroup = useMemo(
-    () => arkGroups.find((item) => item.id === watchedDefaultGroupId) ?? null,
-    [arkGroups, watchedDefaultGroupId]
-  )
-
-  const getArkCredentialOverrides = (values: ConfigFormValues) => {
-    const accessKeyItem = itemMap.get('ark_access_key')
-    const secretKeyItem = itemMap.get('ark_secret_key')
-    const accessValue = typeof values.ark_access_key === 'string' ? values.ark_access_key.trim() : ''
-    const secretValue = typeof values.ark_secret_key === 'string' ? values.ark_secret_key.trim() : ''
-
-    return {
-      accessKey: accessValue && accessValue !== accessKeyItem?.value ? accessValue : undefined,
-      secretKey: secretValue && secretValue !== secretKeyItem?.value ? secretValue : undefined,
-    }
-  }
-
-  const loadArkGroups = async (values: ConfigFormValues, options: { keepSelection?: boolean } = {}) => {
-    setArkGroupsLoading(true)
-    try {
-      const result = await listConfigArkAssetGroups(getArkCredentialOverrides(values))
-      setArkGroups(result.items)
-      setArkGroupsLoaded(true)
-
-      const currentGroupId = typeof values.ark_default_group_id === 'string' ? values.ark_default_group_id : ''
-      const matchedCurrent = result.items.find((item) => item.id === currentGroupId)
-      if (!matchedCurrent && result.items.length > 0) {
-        form.setFieldValue('ark_default_group_id', result.items[0].id)
-      }
-
-      if (result.items.length === 0) {
-        setArkGroupMode('create')
-      } else if (!options.keepSelection || !matchedCurrent) {
-        setArkGroupMode('existing')
-      }
-
-      void messageApi.success(`已加载 ${result.items.length} 个火山素材组`)
-      return result.items
-    } finally {
-      setArkGroupsLoading(false)
-    }
-  }
-
-  const createArkGroup = async (values: ConfigFormValues) => {
-    setCreatingArkGroup(true)
-    try {
-      const created = await createConfigArkAssetGroup({
-        ...getArkCredentialOverrides(values),
-        name: String(values.ark_new_group_name ?? '').trim(),
-        description: String(values.ark_new_group_description ?? '').trim() || undefined,
-      })
-      setArkGroups((current) => {
-        const next = [...current.filter((item) => item.id !== created.id), created]
-        next.sort((left, right) => left.name.localeCompare(right.name, 'zh-CN'))
-        return next
-      })
-      setArkGroupsLoaded(true)
-      setArkGroupMode('existing')
-      form.setFieldValue('ark_default_group_id', created.id)
-      void messageApi.success(`已创建素材组「${created.name}」并设为默认组`)
-      return created.id
-    } finally {
-      setCreatingArkGroup(false)
-    }
-  }
-
-  const ensureArkDefaultGroupReady = async (values: ConfigFormValues) => {
-    if (!groupedItems.ark.length) {
-      return typeof values.ark_default_group_id === 'string' ? values.ark_default_group_id : ''
-    }
-
-    if (arkGroupMode === 'existing') {
-      const result = await form.validateFields(['ark_default_group_id'])
-      return result.ark_default_group_id as string
-    }
-
-    const result = await form.validateFields(['ark_new_group_name', 'ark_new_group_description'])
-    return await createArkGroup({ ...values, ...result })
+  const groupedItems = {
+    brand: items.filter((item) => brandKeys.has(item.key)),
+    oss: items.filter((item) => item.key.startsWith('oss_')),
+    videoLimits: items.filter((item) => videoLimitKeys.has(item.key)),
   }
 
   const handleSave = async (values: ConfigFormValues) => {
@@ -295,10 +197,6 @@ export const ConfigPage = () => {
     const nextValues: ConfigFormValues = {
       ...form.getFieldsValue(),
       ...values,
-    }
-    const resolvedGroupId = await ensureArkDefaultGroupReady(nextValues)
-    if (resolvedGroupId) {
-      nextValues.ark_default_group_id = resolvedGroupId
     }
 
     const changedItems = buildChangedConfigItems(items, nextValues)
@@ -353,6 +251,25 @@ export const ConfigPage = () => {
       )
     }
 
+    if (videoLimitKeys.has(item.key)) {
+      return (
+        <Form.Item
+          key={item.key}
+          label={labels[item.key] ?? item.key}
+          name={item.key}
+          rules={[{ required: true, message: `请输入${labels[item.key] ?? item.key}` }]}
+        >
+          <InputNumber
+            aria-label={labels[item.key] ?? item.key}
+            min={1}
+            max={videoLimitMaxValues[item.key] ?? 30}
+            precision={0}
+            style={{ width: 160 }}
+          />
+        </Form.Item>
+      )
+    }
+
     return (
       <Form.Item
         key={item.key}
@@ -364,12 +281,6 @@ export const ConfigPage = () => {
       </Form.Item>
     )
   }
-
-  const renderSection = (title: string, sectionItems: ConfigItem[]) => (
-    <Card title={title} style={{ borderRadius: 20 }}>
-      {sectionItems.map((item) => renderInputItem(item))}
-    </Card>
-  )
 
   const renderBrandSection = (sectionItems: ConfigItem[]) => {
     const systemNameItem = sectionItems.find((item) => item.key === 'system_name')
@@ -539,168 +450,6 @@ export const ConfigPage = () => {
     )
   }
 
-  const renderArkSection = (sectionItems: ConfigItem[]) => {
-    if (sectionItems.length === 0) {
-      return null
-    }
-
-    const inputItems = sectionItems.filter(
-      (item) =>
-        ![
-          'ark_default_group_id',
-          'ark_default_sync_enabled',
-          'ark_project_name_mode',
-          'ark_project_name_default_value',
-        ].includes(item.key)
-    )
-    const hasDefaultSync = sectionItems.some((item) => item.key === 'ark_default_sync_enabled')
-    const hasProjectNameMode = sectionItems.some((item) => item.key === 'ark_project_name_mode')
-
-    return (
-      <Card title="火山引擎配置" style={{ borderRadius: 20 }}>
-        {inputItems.map((item) => renderInputItem(item))}
-
-        {hasProjectNameMode ? (
-          <>
-            <Form.Item
-              label="火山素材 ProjectName 来源"
-              name="ark_project_name_mode"
-              tooltip="决定素材同步到火山时，ProjectName 取当前项目编码还是固定默认值。"
-            >
-              <Radio.Group>
-                <Radio.Button value="project_code">使用项目编码</Radio.Button>
-                <Radio.Button value="default_value">固定默认值</Radio.Button>
-              </Radio.Group>
-            </Form.Item>
-
-            {watchedProjectNameMode === 'default_value' ? (
-              <Form.Item
-                label="ProjectName 默认值"
-                name="ark_project_name_default_value"
-                rules={[{ required: true, message: '请输入 ProjectName 默认值' }]}
-              >
-                <Input aria-label="ProjectName 默认值" placeholder="例如 xcyj" />
-              </Form.Item>
-            ) : null}
-          </>
-        ) : null}
-
-        {hasDefaultSync ? (
-          <Form.Item
-            label="默认同步策略"
-            name="ark_default_sync_enabled"
-            valuePropName="checked"
-            tooltip="开启后，新建素材组默认同步火山；关闭后默认仅保留本地 OSS 素材。"
-          >
-            <Switch checkedChildren="默认同步" unCheckedChildren="默认不同步" />
-          </Form.Item>
-        ) : null}
-
-        <div
-          style={{
-            marginBottom: 16,
-            borderRadius: 18,
-            border: '1px solid #e7dcc7',
-            background: 'linear-gradient(135deg, #fffaf0 0%, #f8f4ea 100%)',
-            padding: '14px 16px',
-          }}
-        >
-          <Typography.Text strong style={{ color: '#92400e' }}>
-            素材组配置说明
-          </Typography.Text>
-          <Typography.Paragraph style={{ margin: '6px 0 0', color: '#7c5a1f' }}>
-            运行态配置页不再手工维护裸 GroupId。你可以直接校验并加载现有火山素材组，或现场新建一个默认素材组。
-          </Typography.Paragraph>
-        </div>
-
-        <Space direction="vertical" size={16} style={{ width: '100%' }}>
-          <Space wrap>
-            <Button
-              loading={arkGroupsLoading}
-              onClick={async () => {
-                const values = form.getFieldsValue()
-                await loadArkGroups(values)
-              }}
-            >
-              校验 AK/SK 并加载素材组
-            </Button>
-            {selectedArkGroup ? (
-              <Typography.Text type="secondary">
-                当前默认组：{selectedArkGroup.name}（{selectedArkGroup.id}）
-              </Typography.Text>
-            ) : null}
-          </Space>
-
-          {(arkGroupsLoaded || watchedDefaultGroupId) ? (
-            <>
-              <Radio.Group
-                value={arkGroupMode}
-                onChange={(event) => setArkGroupMode(event.target.value as ArkGroupMode)}
-              >
-                <Radio.Button value="existing">选择已有素材组</Radio.Button>
-                <Radio.Button value="create">新建素材组</Radio.Button>
-              </Radio.Group>
-
-              {arkGroupMode === 'existing' ? (
-                <Form.Item
-                  label="默认素材组"
-                  name="ark_default_group_id"
-                  rules={[{ required: true, message: '请选择默认素材组' }]}
-                >
-                  <Select
-                    aria-label="默认素材组"
-                    placeholder={arkGroups.length > 0 ? '请选择默认素材组' : '当前未加载到素材组，可切换到新建模式'}
-                    disabled={arkGroups.length === 0}
-                    options={arkGroups.map((item) => ({
-                      label: item.description ? `${item.name} · ${item.description}` : item.name,
-                      value: item.id,
-                    }))}
-                  />
-                </Form.Item>
-              ) : (
-                <>
-                  <Form.Item
-                    label="新素材组名称"
-                    name="ark_new_group_name"
-                    rules={[{ required: true, message: '请输入新素材组名称' }]}
-                  >
-                    <Input
-                      aria-label="新素材组名称"
-                      placeholder="例如 默认角色图库"
-                      onChange={() => form.setFieldValue('ark_default_group_id', '')}
-                    />
-                  </Form.Item>
-                  <Form.Item label="素材组说明" name="ark_new_group_description">
-                    <Input
-                      aria-label="素材组说明"
-                      placeholder="例如 系统默认同步组"
-                      onChange={() => form.setFieldValue('ark_default_group_id', '')}
-                    />
-                  </Form.Item>
-                  <Button
-                    type="primary"
-                    loading={creatingArkGroup}
-                    onClick={async () => {
-                      const values = form.getFieldsValue()
-                      await form.validateFields(['ark_new_group_name', 'ark_new_group_description'])
-                      await createArkGroup(values)
-                    }}
-                  >
-                    新建并设为默认组
-                  </Button>
-                </>
-              )}
-            </>
-          ) : (
-            <Typography.Text type="secondary">
-              请先使用当前页面里的 AK/SK 校验并加载素材组，再设置默认组。
-            </Typography.Text>
-          )}
-        </Space>
-      </Card>
-    )
-  }
-
   const selectedVideoProvider = videoProviders.find((item) => item.id === selectedVideoProviderId) ?? null
 
   const selectVideoProvider = (id: number) => {
@@ -737,6 +486,19 @@ export const ConfigPage = () => {
       void messageApi.error(error?.response?.data?.message ?? '视频生成平台保存失败')
     } finally {
       setVideoProviderSaving(false)
+    }
+  }
+
+  const switchApiKeyMode = async (mode: ApiKeyMode) => {
+    setApiKeyModeSaving(true)
+    try {
+      await setApiKeyMode(mode)
+      setApiKeyModeState(mode)
+      void messageApi.success(`已切换为${mode === 'global' ? '全局共享 Key' : '成员独立 Key'}模式`)
+    } catch (error: any) {
+      void messageApi.error(error?.response?.data?.message ?? '切换模式失败')
+    } finally {
+      setApiKeyModeSaving(false)
     }
   }
 
@@ -782,32 +544,81 @@ export const ConfigPage = () => {
     </Card>
   )
 
+  const renderVideoLimitsSection = () => {
+    if (groupedItems.videoLimits.length === 0) {
+      return null
+    }
+
+    return (
+      <Card title="视频生成限制" style={{ borderRadius: 20 }}>
+        <Space direction="vertical" size={12} style={{ width: '100%' }}>
+          <Typography.Text type="secondary">
+            全能参考模式的全局素材数量上限，实际生效上限为「此处配置」与「所选模型支持上限」的较小值，修改后立即生效。模型上限：Seedance 2.0 / 2.0 Fast / mini 为图片 9、视频 3、音频 3；Seedance 2.5 为图片 30、视频 10、音频 10（总参考素材最多 50 个）。
+          </Typography.Text>
+          {groupedItems.videoLimits.map((item) => renderInputItem(item))}
+        </Space>
+      </Card>
+    )
+  }
+
   return (
     <>
       {contextHolder}
       <Space direction="vertical" size={20} style={{ width: '100%' }}>
         <PageHeader
           title="系统配置"
-          description="所有配置更新后立即生效，密文字段默认展示脱敏值。素材组默认配置会严格作用于当前项目下的新建素材组与素材同步策略。"
+          description="所有配置更新后立即生效，密文字段默认展示脱敏值。"
         />
 
         <Form form={form} layout="vertical" onFinish={handleSave} disabled={loading}>
           <Space direction="vertical" size={20} style={{ width: '100%' }}>
             {renderBrandSection(groupedItems.brand)}
             {renderVideoProviderSection()}
-            <div
-              data-testid="config-provider-grid"
-              style={{
-                display: 'grid',
-                gridTemplateColumns: 'repeat(auto-fit, minmax(min(100%, 420px), 1fr))',
-                gap: 20,
-                width: '100%',
-                alignItems: 'start',
-              }}
-            >
-              {renderArkSection(groupedItems.ark)}
-              {renderSection('阿里云 OSS 配置', groupedItems.oss)}
-            </div>
+            {renderVideoLimitsSection()}
+
+            <Card title="API Key 模式" style={{ borderRadius: 20 }}>
+              <Space direction="vertical" size={16} style={{ width: '100%' }}>
+                <Radio.Group
+                  value={apiKeyMode}
+                  onChange={(event) => void switchApiKeyMode(event.target.value as ApiKeyMode)}
+                  disabled={apiKeyModeSaving}
+                >
+                  <Space direction="vertical" size={12}>
+                    <Radio value="global">
+                      <Typography.Text strong>全局共享 Key（默认）</Typography.Text>
+                      <Typography.Paragraph type="secondary" style={{ margin: '4px 0 0 24px' }}>
+                        所有用户使用系统统一 Key，无法按人统计用量。
+                      </Typography.Paragraph>
+                    </Radio>
+                    <Radio value="per_member">
+                      <Typography.Text strong>成员独立 Key</Typography.Text>
+                      <Typography.Paragraph type="secondary" style={{ margin: '4px 0 0 24px' }}>
+                        每个成员使用独立 API Key，可在 ToAPIs 后台按 Key 查看 Token 消耗。未配置个人 Key 的用户将无法生成视频。
+                      </Typography.Paragraph>
+                    </Radio>
+                  </Space>
+                </Radio.Group>
+                {apiKeyMode === 'per_member' ? (
+                  <div
+                    style={{
+                      borderRadius: 16,
+                      border: '1px solid #e7dcc7',
+                      background: 'linear-gradient(135deg, #fffaf0 0%, #f8f4ea 100%)',
+                      padding: '12px 16px',
+                    }}
+                  >
+                    <Typography.Text style={{ color: '#92400e' }}>
+                      ⚠ 切换为成员独立 Key 前，请确保已在「用户管理」中为每个需要生成视频的成员配置了个人 API Key。
+                    </Typography.Text>
+                  </div>
+                ) : null}
+              </Space>
+            </Card>
+
+            <Card title="阿里云 OSS 配置" style={{ borderRadius: 20 }}>
+              {groupedItems.oss.map((item) => renderInputItem(item))}
+            </Card>
+
             <Card style={{ borderRadius: 20 }}>
               <Space direction="vertical" size={12} style={{ width: '100%' }}>
                 <Button type="primary" htmlType="submit" loading={saving}>

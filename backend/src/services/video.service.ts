@@ -5,6 +5,7 @@ import { sql } from 'kysely'
 import { db } from '../db/kysely'
 import { ConfigService } from './config.service'
 import type { OssServiceContract } from './oss.service'
+import { UserApiKeyService } from './user-api-key.service'
 import {
   buildVideoExportCsv,
   createVideoExportFileNames,
@@ -12,7 +13,7 @@ import {
 } from './video-export.service'
 import { VideoGenerationLogger } from './video-generation-log.service'
 import { VideoProviderService, type VideoProviderSnapshot } from './video-provider.service'
-import { ForbiddenError, NotFoundError } from '../utils/errors'
+import { ForbiddenError, NotFoundError, ValidationAppError } from '../utils/errors'
 import { assertProjectPermission, canCreateVideoTask } from '../utils/project-permissions'
 
 export type VideoStatus = 'pending' | 'processing' | 'succeeded' | 'failed'
@@ -93,6 +94,8 @@ export interface VideoRecord {
   requestSnapshot: VideoRequestSnapshot
   arkVideoUrl: string | null
   videoOssKey: string | null
+  downloadClaimedAt?: Date | null
+  downloadClaimToken?: string | null
   completionTokens: number | null
   totalTokens: number | null
   errorMessage: string | null
@@ -177,8 +180,11 @@ export interface VideoRepository {
   getExportData(params: VideoExportQueryParams): Promise<VideoExportData>
   findById(id: number, options?: { projectId?: number }): Promise<VideoRecord | null>
   update(id: number, patch: Partial<VideoRecord>): Promise<VideoRecord | null>
+  claimDownload(taskId: number): Promise<string | null>
+  updateDownloadState(taskId: number, claimToken: string, patch: Partial<VideoRecord>): Promise<VideoRecord | null>
   saveAssetReferences(taskId: number, references: VideoTaskAssetReference[]): Promise<void>
   listSyncableArkTasks(input: { now: Date; limit: number }): Promise<VideoRecord[]>
+  listDownloadableTasks(input: { now: Date; limit: number }): Promise<VideoRecord[]>
   listStaleProcessingTasks(input: { updatedBefore: Date; limit: number }): Promise<VideoRecord[]>
   getDurationEstimate(input: {
     model: string
@@ -190,7 +196,8 @@ export interface VideoRepository {
 
 export interface VideoDispatcher {
   enqueueCreate(taskId: number): Promise<void>
-  enqueueSync(taskId: number, options?: { delayMs?: number }): Promise<void>
+  enqueueSync(taskId: number, options?: { delayMs?: number; runAt?: Date }): Promise<void>
+  enqueueDownload(taskId: number): Promise<void>
 }
 
 export interface VideoAssetReferenceResolver {
@@ -216,6 +223,8 @@ type VideoRow = {
   request_snapshot: Record<string, unknown>
   ark_video_url: string | null
   video_oss_key: string | null
+  download_claimed_at: Date | string | null
+  download_claim_token: string | null
   completion_tokens: number | null
   total_tokens: number | null
   error_message: string | null
@@ -235,6 +244,8 @@ const normalizeDbNumber = (value: number | string | null | undefined): number =>
   const normalized = Number(value)
   return Number.isFinite(normalized) ? normalized : 0
 }
+
+const VIDEO_DOWNLOAD_CLAIM_TIMEOUT_MS = 20 * 60_000
 
 export class KyselyVideoRepository implements VideoRepository {
   public async create(input: Omit<VideoRecord, 'id' | 'createdAt' | 'updatedAt'>): Promise<VideoRecord> {
@@ -258,6 +269,7 @@ export class KyselyVideoRepository implements VideoRepository {
         request_snapshot: input.requestSnapshot,
         ark_video_url: input.arkVideoUrl,
         video_oss_key: input.videoOssKey,
+        download_claimed_at: input.downloadClaimedAt,
         completion_tokens: input.completionTokens,
         total_tokens: input.totalTokens,
         error_message: input.errorMessage,
@@ -616,6 +628,49 @@ export class KyselyVideoRepository implements VideoRepository {
     return row ? this.mapRow(row) : null
   }
 
+  public async claimDownload(taskId: number): Promise<string | null> {
+    const claimToken = randomUUID()
+    const row = await db
+      .updateTable('video_tasks')
+      .set({ download_claimed_at: new Date(), download_claim_token: claimToken, updated_at: new Date() })
+      .where('id', '=', taskId)
+      .where('status', '=', 'processing')
+      .where('ark_video_url', 'is not', null)
+      .where('video_oss_key', 'is', null)
+      .where((eb) => eb.or([
+        eb('download_claimed_at', 'is', null),
+        eb('download_claimed_at', '<', new Date(Date.now() - VIDEO_DOWNLOAD_CLAIM_TIMEOUT_MS)),
+      ]))
+      .returning('id')
+      .executeTakeFirst()
+
+    return row ? claimToken : null
+  }
+
+  public async updateDownloadState(taskId: number, claimToken: string, patch: Partial<VideoRecord>): Promise<VideoRecord | null> {
+    const row = await db
+      .updateTable('video_tasks')
+      .set({
+        status: patch.status,
+        video_oss_key: patch.videoOssKey,
+        download_claimed_at: patch.downloadClaimedAt,
+        download_claim_token: patch.downloadClaimToken,
+        error_message: patch.errorMessage,
+        next_poll_at: patch.nextPollAt,
+        last_polled_at: patch.lastPolledAt,
+        updated_at: new Date(),
+      })
+      .where('id', '=', taskId)
+      .where('status', '=', 'processing')
+      .where('video_oss_key', 'is', null)
+      .where('download_claimed_at', 'is not', null)
+      .where('download_claim_token', '=', claimToken)
+      .returningAll()
+      .executeTakeFirst()
+
+    return row ? this.mapRow(row) : null
+  }
+
   public async saveAssetReferences(taskId: number, references: VideoTaskAssetReference[]): Promise<void> {
     if (references.length === 0) {
       return
@@ -640,8 +695,32 @@ export class KyselyVideoRepository implements VideoRepository {
       .where('status', 'in', ['pending', 'processing'])
       .where('ark_task_id', 'is not', null)
       .where('video_oss_key', 'is', null)
+      .where('ark_video_url', 'is', null)
       .where('next_poll_at', 'is not', null)
       .where('next_poll_at', '<=', input.now)
+      .orderBy('next_poll_at', 'asc')
+      .orderBy('updated_at', 'asc')
+      .limit(input.limit)
+      .execute()
+
+    return rows.map((row) => this.mapRow(row))
+  }
+
+  public async listDownloadableTasks(input: { now: Date; limit: number }): Promise<VideoRecord[]> {
+    const rows = await db
+      .selectFrom('video_tasks')
+      .selectAll()
+      .where('status', '=', 'processing')
+      .where('ark_video_url', 'is not', null)
+      .where('video_oss_key', 'is', null)
+      .where((eb) => eb.or([
+        eb.and([
+          eb('download_claimed_at', 'is', null),
+          eb('next_poll_at', 'is not', null),
+          eb('next_poll_at', '<=', input.now),
+        ]),
+        eb('download_claimed_at', '<', new Date(input.now.getTime() - VIDEO_DOWNLOAD_CLAIM_TIMEOUT_MS)),
+      ]))
       .orderBy('next_poll_at', 'asc')
       .orderBy('updated_at', 'asc')
       .limit(input.limit)
@@ -721,6 +800,8 @@ export class KyselyVideoRepository implements VideoRepository {
       requestSnapshot: row.request_snapshot as VideoRequestSnapshot,
       arkVideoUrl: row.ark_video_url,
       videoOssKey: row.video_oss_key,
+      downloadClaimedAt: row.download_claimed_at === null ? null : new Date(row.download_claimed_at),
+      downloadClaimToken: row.download_claim_token,
       completionTokens: row.completion_tokens === null ? null : Number(row.completion_tokens),
       totalTokens: row.total_tokens === null ? null : Number(row.total_tokens),
       errorMessage: row.error_message,
@@ -828,6 +909,7 @@ class KyselyVideoAssetReferenceResolver implements VideoAssetReferenceResolver {
 export class NoopVideoDispatcher implements VideoDispatcher {
   public async enqueueCreate(): Promise<void> {}
   public async enqueueSync(): Promise<void> {}
+  public async enqueueDownload(): Promise<void> {}
 }
 
 export class VideoService {
@@ -838,7 +920,8 @@ export class VideoService {
     private readonly configService: ConfigService = new ConfigService(),
     private readonly assetReferenceResolver: VideoAssetReferenceResolver = new KyselyVideoAssetReferenceResolver(),
     private readonly generationLogger: VideoGenerationLogger = new VideoGenerationLogger(),
-    private readonly providerService: VideoProviderService = new VideoProviderService()
+    private readonly providerService: VideoProviderService = new VideoProviderService(),
+    private readonly userApiKeyService: UserApiKeyService = new UserApiKeyService()
   ) {}
 
   public async createVideoTask(input: {
@@ -860,6 +943,17 @@ export class VideoService {
     content: VideoContentItem[]
   }) {
     assertProjectPermission(canCreateVideoTask(input.projectRole), '当前项目角色不允许创建视频任务')
+
+    const apiKeyMode = await this.userApiKeyService.getApiKeyMode()
+    if (apiKeyMode === 'per_member') {
+      const providerKey = input.providerKey ?? ''
+      if (providerKey) {
+        const userKey = await this.userApiKeyService.getByUser(input.userId, providerKey)
+        if (!userKey) {
+          throw new ValidationAppError('当前为成员独立 Key 模式，您尚未配置个人 API Key，请联系管理员配置')
+        }
+      }
+    }
 
     const provider = input.providerKey ? await this.providerService.getActiveForTask(input.providerKey) : null
     if (provider) {
@@ -1098,6 +1192,13 @@ export class VideoService {
       return this.toResponse(completedRecord ?? record, null, new Map())
     }
 
+    // 上游已出结果但下载失败（如文件已过期 404）的任务，重新拉取也无法取回成品，
+    // 提示直接重新生成，避免任务被无限复活后每轮等待 24 小时超时
+    if (record.status === 'failed' && record.lastArkStatus === 'completed' && record.arkVideoUrl) {
+      throw new ValidationAppError('该任务的结果文件已无法取回（上游文件已过期或删除），请直接重新生成任务')
+    }
+
+    const manualPollAt = new Date(Date.now() + 1_000)
     const nextRecord = await this.generationLogger.step(
       {
         ...this.toLogContext(record),
@@ -1113,9 +1214,12 @@ export class VideoService {
       async () => this.repository.update(id, {
         status: 'processing',
         errorMessage: null,
-        nextPollAt: new Date(),
+        nextPollAt: manualPollAt,
       })
     )
+
+    // 手动同步也使用确定的执行时间和任务 ID；入队失败时由数据库扫描按 nextPollAt 兜底。
+    await this.dispatcher.enqueueSync(id, { runAt: manualPollAt }).catch(() => undefined)
 
     return this.toResponse(nextRecord ?? record, null, new Map())
   }

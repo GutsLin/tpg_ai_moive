@@ -7,6 +7,7 @@ import {
   type PropsWithChildren,
 } from 'react'
 
+import { getApiKeyMode, type ApiKeyMode } from '../api/config'
 import { getAuthSession, type AuthUser, type LoginResponse, type ProjectRole, type UserProject } from '../api/auth'
 import { clearAllVideoDrafts } from '../utils/video-draft-storage'
 
@@ -30,6 +31,7 @@ interface AuthState {
   activeProjectId: number | null
   activeProjectRole: ProjectRole | null
   projectRefreshToken: number
+  apiKeyMode: ApiKeyMode | null
   hydrated: boolean
 }
 
@@ -57,6 +59,7 @@ type AuthAction =
       }
     }
   | { type: 'set-active-project'; payload: { activeProjectId: number; activeProjectRole: ProjectRole | null } }
+  | { type: 'set-api-key-mode'; payload: { mode: ApiKeyMode } }
   | { type: 'logout' }
 
 interface AuthContextValue {
@@ -75,6 +78,7 @@ const initialState: AuthState = {
   activeProjectId: null,
   activeProjectRole: null,
   projectRefreshToken: 0,
+  apiKeyMode: null,
   hydrated: false,
 }
 
@@ -143,6 +147,7 @@ const reducer = (state: AuthState, action: AuthAction): AuthState => {
         activeProjectId: action.payload.activeProjectId,
         activeProjectRole: action.payload.activeProjectRole,
         projectRefreshToken: 0,
+        apiKeyMode: state.apiKeyMode,
         hydrated: true,
       }
     case 'login':
@@ -154,6 +159,7 @@ const reducer = (state: AuthState, action: AuthAction): AuthState => {
         activeProjectId: action.payload.activeProjectId,
         activeProjectRole: action.payload.activeProjectRole,
         projectRefreshToken: 0,
+        apiKeyMode: state.apiKeyMode,
         hydrated: true,
       }
     case 'set-active-project':
@@ -163,6 +169,8 @@ const reducer = (state: AuthState, action: AuthAction): AuthState => {
         activeProjectRole: action.payload.activeProjectRole,
         projectRefreshToken: state.projectRefreshToken + 1,
       }
+    case 'set-api-key-mode':
+      return { ...state, apiKeyMode: action.payload.mode }
     case 'logout':
       return {
         token: null,
@@ -172,6 +180,7 @@ const reducer = (state: AuthState, action: AuthAction): AuthState => {
         activeProjectId: null,
         activeProjectRole: null,
         projectRefreshToken: 0,
+        apiKeyMode: null,
         hydrated: true,
       }
     default:
@@ -241,6 +250,10 @@ export const AuthProvider = ({ children }: PropsWithChildren) => {
             activeProjectRole: projectContext.activeProjectRole,
           },
         })
+
+        void getApiKeyMode()
+          .then((result) => dispatch({ type: 'set-api-key-mode', payload: { mode: result.mode } }))
+          .catch(() => {})
       },
       login: (payload) => {
         const projects = payload.projects ?? []
@@ -268,6 +281,10 @@ export const AuthProvider = ({ children }: PropsWithChildren) => {
             activeProjectRole: projectContext.activeProjectRole,
           },
         })
+
+        void getApiKeyMode()
+          .then((result) => dispatch({ type: 'set-api-key-mode', payload: { mode: result.mode } }))
+          .catch(() => {})
       },
       switchProject: (projectId) => {
         const project = state.projects.find((item) => item.id === projectId)

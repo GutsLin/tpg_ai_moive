@@ -1,6 +1,7 @@
 import { db } from '../db/kysely'
 import { ValidationAppError } from '../utils/errors'
 import { ConfigService } from './config.service'
+import { UserApiKeyService, type ApiKeyMode } from './user-api-key.service'
 
 export type VideoProviderType = 'toapis' | 'volcano_ark'
 
@@ -20,6 +21,7 @@ export interface VideoProviderModelCapability {
     generateAudio: boolean
     outputFormat?: boolean
   }
+  referenceLimits?: VideoProviderReferenceLimits
 }
 
 export interface VideoProviderCapabilities {
@@ -41,11 +43,22 @@ export interface VideoProviderRecord {
   updatedAt: Date
 }
 
+export interface VideoProviderReferenceLimits {
+  image: number
+  video: number
+  audio: number
+}
+
 export interface VideoProviderPublic {
   providerKey: string
   name: string
   providerType: VideoProviderType
   capabilities: VideoProviderCapabilities
+  referenceLimits?: VideoProviderReferenceLimits
+}
+
+export interface ActiveVideoProviderResponse extends VideoProviderPublic {
+  referenceLimits: VideoProviderReferenceLimits
 }
 
 export interface VideoProviderAdmin extends VideoProviderPublic {
@@ -75,6 +88,7 @@ const toApisCapabilities: VideoProviderCapabilities = {
       aspectRatios: ['21:9', '16:9', '4:3', '1:1', '3:4', '9:16', 'adaptive'],
       operations: ['generate'],
       supports: { firstLastFrame: true, referenceImage: true, referenceVideo: true, referenceAudio: true, generateAudio: true },
+      referenceLimits: { image: 9, video: 3, audio: 3 },
     },
     {
       id: 'seedance-2-fast',
@@ -84,6 +98,7 @@ const toApisCapabilities: VideoProviderCapabilities = {
       aspectRatios: ['21:9', '16:9', '4:3', '1:1', '3:4', '9:16', 'adaptive'],
       operations: ['generate'],
       supports: { firstLastFrame: true, referenceImage: true, referenceVideo: true, referenceAudio: true, generateAudio: true },
+      referenceLimits: { image: 9, video: 3, audio: 3 },
     },
     {
       id: 'seedance-2-5',
@@ -101,8 +116,17 @@ const toApisCapabilities: VideoProviderCapabilities = {
         generateAudio: true,
         outputFormat: true,
       },
+      referenceLimits: { image: 30, video: 10, audio: 10 },
     },
   ],
+}
+
+// ToAPIs 平台各模型的参考素材上限（数据库中的旧能力快照缺少该字段时按模型 ID 注入）
+const modelReferenceLimitsByModelId: Record<string, VideoProviderReferenceLimits> = {
+  'seedance-2': { image: 9, video: 3, audio: 3 },
+  'seedance-2-fast': { image: 9, video: 3, audio: 3 },
+  'seedance-2-mini': { image: 9, video: 3, audio: 3 },
+  'seedance-2-5': { image: 30, video: 10, audio: 10 },
 }
 
 const normalizeCapabilities = (value: Record<string, unknown>): VideoProviderCapabilities => {
@@ -118,16 +142,19 @@ const normalizeEndpoint = (endpoint: string) => endpoint.trim().replace(/\/+$/, 
 const isProviderType = (value: string): value is VideoProviderType => value === 'toapis' || value === 'volcano_ark'
 
 export class VideoProviderService {
-  public constructor(private readonly configService: ConfigService = new ConfigService()) {}
+  public constructor(
+    private readonly configService: ConfigService = new ConfigService(),
+    private readonly userApiKeyService: UserApiKeyService = new UserApiKeyService()
+  ) {}
 
   public async listForAdmin(): Promise<{ items: VideoProviderAdmin[] }> {
     const rows = await db.selectFrom('video_providers').selectAll().orderBy('id', 'asc').execute()
     return { items: rows.map((row) => this.toAdmin(row)) }
   }
 
-  public async getActiveForPublic(): Promise<VideoProviderPublic> {
+  public async getActiveForPublic(): Promise<ActiveVideoProviderResponse> {
     const provider = await this.getDefaultEnabled()
-    return this.toPublic(provider)
+    return { ...this.toPublic(provider), referenceLimits: await this.getReferenceLimits() }
   }
 
   public async getActiveForTask(providerKey: string): Promise<{ record: VideoProviderRecord; snapshot: VideoProviderSnapshot }> {
@@ -144,16 +171,36 @@ export class VideoProviderService {
     return { record, snapshot: this.toSnapshot(record) }
   }
 
-  public async getClientConfiguration(snapshot: VideoProviderSnapshot): Promise<{ endpoint: string; apiKey: string }> {
+  public async getClientConfiguration(
+    snapshot: VideoProviderSnapshot,
+    userId?: number
+  ): Promise<{ endpoint: string; apiKey: string }> {
     const provider = await db
       .selectFrom('video_providers')
-      .select(['provider_key', 'api_key'])
+      .select(['provider_key', 'api_key', 'endpoint'])
       .where('provider_key', '=', snapshot.providerKey)
       .executeTakeFirst()
     if (!provider) {
       throw new ValidationAppError(`视频生成平台 ${snapshot.name} 已被删除，无法继续查询任务`)
     }
-    return { endpoint: snapshot.endpoint, apiKey: this.decryptStoredKey(provider.api_key) }
+
+    const globalApiKey = this.decryptStoredKey(provider.api_key)
+    // endpoint 优先使用平台当前配置：历史任务快照中的 endpoint 可能已失效（域名切换），
+    // 与 api_key 保持同样取当前值的语义
+    const endpoint = normalizeEndpoint(provider.endpoint) || snapshot.endpoint
+
+    if (userId !== undefined) {
+      const mode = await this.userApiKeyService.getApiKeyMode()
+      if (mode === 'per_member') {
+        const resolved = await this.userApiKeyService.resolveApiKey(userId, snapshot.providerKey, mode)
+        if (resolved) {
+          return { endpoint, apiKey: resolved.apiKey }
+        }
+        // Fall back to global key — ensures already-created tasks can still poll
+      }
+    }
+
+    return { endpoint, apiKey: globalApiKey }
   }
 
   public async create(input: {
@@ -282,6 +329,20 @@ export class VideoProviderService {
     return this.toRecord(row)
   }
 
+  private async getReferenceLimits(): Promise<VideoProviderReferenceLimits> {
+    const readLimit = async (key: string, fallback: number, max: number) => {
+      const raw = await this.configService.getOptional(key)
+      const parsed = Number.parseInt(raw ?? '', 10)
+      return Number.isInteger(parsed) && parsed >= 1 && parsed <= max ? parsed : fallback
+    }
+
+    return {
+      image: await readLimit('video_reference_image_limit', 30, 30),
+      video: await readLimit('video_reference_video_limit', 10, 10),
+      audio: await readLimit('video_reference_audio_limit', 10, 10),
+    }
+  }
+
   private assertInput(input: { providerKey: string; name: string; providerType: string; endpoint: string; apiKey: string }): void {
     if (!/^[a-z][a-z0-9_-]{1,63}$/.test(input.providerKey.trim())) {
       throw new ValidationAppError('平台标识仅支持小写字母、数字、下划线和连字符')
@@ -304,7 +365,18 @@ export class VideoProviderService {
   }
 
   private toPublic(record: VideoProviderRecord): VideoProviderPublic {
-    return { providerKey: record.providerKey, name: record.name, providerType: record.providerType, capabilities: record.capabilities }
+    return {
+      providerKey: record.providerKey,
+      name: record.name,
+      providerType: record.providerType,
+      capabilities: {
+        ...record.capabilities,
+        models: record.capabilities.models.map((model) => ({
+          ...model,
+          referenceLimits: model.referenceLimits ?? modelReferenceLimitsByModelId[model.id],
+        })),
+      },
+    }
   }
 
   private toSnapshot(record: VideoProviderRecord): VideoProviderSnapshot {

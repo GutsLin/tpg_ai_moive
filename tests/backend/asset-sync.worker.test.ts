@@ -251,6 +251,108 @@ describe('asset-sync.worker', () => {
     ])
   })
 
+  it('瞬时网络错误保持 pending 等待重试，不落 failed 终态', async () => {
+    const arkClient: ArkAssetClient = {
+      createAsset: vi.fn().mockRejectedValue(new TypeError('fetch failed')),
+      getAsset: vi.fn(),
+      deleteAsset: vi.fn(),
+    }
+
+    repository.seed([
+      {
+        id: 30,
+        createdByUserId: 1,
+        sourceProjectId: 101,
+        name: '网络抖动素材',
+        assetType: 'Image',
+        categoryId: 1,
+        groupSyncEnabled: true,
+        syncMode: 'inherit',
+        ossKey: 'assets/net.png',
+        arkGroupId: null,
+        arkAssetId: null,
+        arkStatus: 'pending',
+        arkError: null,
+        tags: [],
+        createdAt: new Date('2026-04-04T00:00:00.000Z'),
+        updatedAt: new Date('2026-04-04T00:00:00.000Z'),
+      },
+    ])
+
+    const processor = createAssetSyncProcessor({
+      repository,
+      ossService,
+      arkClient,
+      getDefaultGroupId: async () => 'group-default',
+      getDefaultSyncEnabled: async () => true,
+      getProjectName: async () => 'xcyj',
+      sleep: vi.fn().mockResolvedValue(undefined),
+    })
+
+    await expect(processor({ assetId: 30 })).rejects.toThrow('fetch failed')
+
+    expect(repository.updates).toEqual([
+      {
+        id: 30,
+        patch: {
+          arkStatus: 'pending',
+          arkError: '同步暂时失败，等待自动重试: fetch failed',
+        },
+      },
+    ])
+  })
+
+  it('永久性错误仍标记 failed 终态', async () => {
+    const arkClient: ArkAssetClient = {
+      createAsset: vi.fn().mockRejectedValue(new Error('InvalidParameter.AspectRatioTooSmall: bad ratio')),
+      getAsset: vi.fn(),
+      deleteAsset: vi.fn(),
+    }
+
+    repository.seed([
+      {
+        id: 31,
+        createdByUserId: 1,
+        sourceProjectId: 101,
+        name: '非法素材',
+        assetType: 'Image',
+        categoryId: 1,
+        groupSyncEnabled: true,
+        syncMode: 'inherit',
+        ossKey: 'assets/bad.png',
+        arkGroupId: null,
+        arkAssetId: null,
+        arkStatus: 'pending',
+        arkError: null,
+        tags: [],
+        createdAt: new Date('2026-04-04T00:00:00.000Z'),
+        updatedAt: new Date('2026-04-04T00:00:00.000Z'),
+      },
+    ])
+
+    const processor = createAssetSyncProcessor({
+      repository,
+      ossService,
+      arkClient,
+      getDefaultGroupId: async () => 'group-default',
+      getDefaultSyncEnabled: async () => true,
+      getProjectName: async () => 'xcyj',
+      sleep: vi.fn().mockResolvedValue(undefined),
+    })
+
+    await expect(processor({ assetId: 31 })).rejects.toThrow('InvalidParameter')
+
+    expect(repository.updates).toEqual([
+      {
+        id: 31,
+        patch: {
+          arkStatus: 'failed',
+          arkError: 'InvalidParameter.AspectRatioTooSmall: bad ratio',
+        },
+      },
+    ])
+  })
+
   it('幂等重试时若已有 arkAssetId 则不会重复 createAsset', async () => {
     const arkClient: ArkAssetClient = {
       createAsset: vi.fn().mockResolvedValue('asset-new'),
@@ -399,8 +501,9 @@ describe('asset-sync.worker', () => {
       getProjectName: async () => 'xcyj',
     })
 
-    await expect(processor({ assetId: 4 })).rejects.toThrow('ark delete failed')
-    expect(repository.deletedIds).toEqual([])
+    // 远端删除失败不再阻断本地清理：记录错误后仍删除 DB 记录，残留远端素材由 reconcile 幂等重推
+    await processor({ assetId: 4 })
+    expect(repository.deletedIds).toEqual([4])
     expect(repository.updates).toContainEqual({
       id: 4,
       patch: {

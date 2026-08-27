@@ -1,14 +1,12 @@
 FROM node:24-bookworm-slim AS build
 
-ENV COREPACK_NPM_REGISTRY=https://registry.npmjs.org/
-
-RUN corepack enable
+RUN npm config set registry https://registry.npmmirror.com/ && npm install -g pnpm@11.19.0
 
 WORKDIR /app/backend
 
 COPY backend/package.json backend/pnpm-lock.yaml backend/pnpm-workspace.yaml backend/tsconfig.json ./
 
-RUN pnpm config set registry https://registry.npmjs.org/ \
+RUN pnpm config set registry https://registry.npmmirror.com/ \
   && pnpm install --frozen-lockfile
 
 COPY backend/src ./src

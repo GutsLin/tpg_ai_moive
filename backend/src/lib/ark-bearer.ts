@@ -1,5 +1,8 @@
 import { ConfigService } from '../services/config.service'
 
+// 平台 API 单次请求超时，防止接口挂起拖死调用方
+const ARK_API_TIMEOUT_MS = 60_000
+
 export interface ArkVideoTaskInfo {
   id: string
   status: string
@@ -441,6 +444,8 @@ export class ArkBearerClient implements ArkVideoClient {
         'Content-Type': 'application/json',
         ...(init.headers ?? {}),
       },
+      // 防止平台接口挂起拖死调用方（如视频轮询循环）
+      signal: init.signal ?? AbortSignal.timeout(ARK_API_TIMEOUT_MS),
     })
 
     const json = await response.json().catch(() => null)

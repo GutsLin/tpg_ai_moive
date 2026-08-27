@@ -1,4 +1,5 @@
 import OSS from 'ali-oss'
+import type { Readable } from 'node:stream'
 import * as OpenApi from '@alicloud/openapi-client'
 import StsClient from '@alicloud/sts20150401'
 import { AssumeRoleRequest } from '@alicloud/sts20150401'
@@ -25,16 +26,18 @@ export interface OssServiceContract {
   getStsCredentials(): Promise<OssStsResponse>
   deleteObject(ossKey: string): Promise<void>
   putObject(ossKey: string, data: Buffer, contentType?: string): Promise<void>
+  putObjectStream?(ossKey: string, data: Readable, contentType?: string): Promise<void>
 }
 
 const SERVER_OSS_TIMEOUT_MS = 300_000
+const SERVER_OSS_STREAM_TIMEOUT_MS = 20 * 60_000
 const SERVER_OSS_RETRY_MAX = 3
 const SERVER_OSS_INTERNAL_CONFIG_KEY = 'oss_server_internal_enabled'
 
 export class OssService implements OssServiceContract {
   public constructor(private readonly configService: ConfigService = new ConfigService()) {}
 
-  private async createClient(options?: { serverOperation?: boolean }): Promise<InstanceType<typeof OSS>> {
+  private async createClient(options?: { serverOperation?: boolean; timeoutMs?: number }): Promise<InstanceType<typeof OSS>> {
     const useInternalEndpoint =
       options?.serverOperation === true &&
       (await this.configService.getOptional(SERVER_OSS_INTERNAL_CONFIG_KEY)) === 'true'
@@ -48,7 +51,7 @@ export class OssService implements OssServiceContract {
       ...(useInternalEndpoint ? { internal: true } : {}),
       ...(options?.serverOperation
         ? {
-            timeout: SERVER_OSS_TIMEOUT_MS,
+            timeout: options.timeoutMs ?? SERVER_OSS_TIMEOUT_MS,
             retryMax: SERVER_OSS_RETRY_MAX,
           }
         : {}),
@@ -80,6 +83,12 @@ export class OssService implements OssServiceContract {
     const client = await this.createClient({ serverOperation: true })
 
     await client.put(ossKey, data, contentType ? { headers: { 'Content-Type': contentType } } : undefined)
+  }
+
+  public async putObjectStream(ossKey: string, data: Readable, contentType?: string): Promise<void> {
+    const client = await this.createClient({ serverOperation: true, timeoutMs: SERVER_OSS_STREAM_TIMEOUT_MS })
+
+    await (client as any).putStream(ossKey, data, contentType ? { headers: { 'Content-Type': contentType } } : undefined)
   }
 
   public async getStsCredentials(): Promise<OssStsResponse> {
