@@ -1,9 +1,10 @@
 import type { Context } from 'koa'
 import { ok } from '../utils/http'
 import type { AtelierService } from '../services/atelier.service'
+import type { AtelierAiService } from '../services/atelier-ai.service'
 
 export class AtelierController {
-  public constructor(private readonly service: AtelierService) {}
+  public constructor(private readonly service: AtelierService, private readonly aiService?: AtelierAiService) {}
   listCanvases = async (ctx: Context) => { ctx.body = ok(await this.service.listCanvases(Number(ctx.state.projectId), Number(ctx.state.user?.sub))) }
   getCanvas = async (ctx: Context, id: number) => { ctx.body = ok(await this.service.getCanvas(Number(ctx.state.projectId), Number(ctx.state.user?.sub), id)) }
   createCanvas = async (ctx: Context) => { ctx.body = ok(await this.service.createCanvas(Number(ctx.state.projectId), Number(ctx.state.user?.sub), ctx.request.body as any)) }
@@ -13,4 +14,5 @@ export class AtelierController {
   createPrompt = async (ctx: Context) => { ctx.body = ok(await this.service.createPrompt(Number(ctx.state.projectId), Number(ctx.state.user?.sub), ctx.request.body as any)) }
   updatePrompt = async (ctx: Context, id: number) => { ctx.body = ok(await this.service.updatePrompt(Number(ctx.state.projectId), Number(ctx.state.user?.sub), ctx.state.projectRole ?? 'member', id, ctx.request.body as any)) }
   deletePrompt = async (ctx: Context, id: number) => { ctx.body = ok(await this.service.deletePrompt(Number(ctx.state.projectId), Number(ctx.state.user?.sub), ctx.state.projectRole ?? 'member', id)) }
+  aiCapabilities = async (ctx: Context) => { ctx.body = ok(await this.aiService!.getCapabilities()) }
 }

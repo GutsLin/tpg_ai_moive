@@ -24,6 +24,7 @@ const videoLimitMaxValues: Record<string, number> = {
   video_reference_video_limit: 10,
   video_reference_audio_limit: 10,
 }
+const booleanConfigKeys = new Set(['oss_server_internal_enabled', 'infinite_atelier_video_enabled'])
 const labels: Record<string, string> = {
   system_name: '系统名称',
   system_logo_key: '系统 Logo',
@@ -33,6 +34,7 @@ const labels: Record<string, string> = {
   oss_bucket: 'OSS Bucket',
   oss_region: 'OSS Region',
   oss_server_internal_enabled: '服务端 OSS 访问网络',
+  infinite_atelier_video_enabled: '无限画布视频生成',
   oss_signed_url_ttl: '签名 URL TTL',
   video_reference_image_limit: '参考图片上限',
   video_reference_video_limit: '参考视频上限',
@@ -48,7 +50,7 @@ const emptyVideoProviderDraft = (): VideoProviderDraft => ({
 })
 
 const normalizeConfigFormValue = (item: ConfigItem): string | number | boolean => {
-  if (item.key === 'oss_server_internal_enabled') {
+  if (booleanConfigKeys.has(item.key)) {
     return item.value === 'true'
   }
 
@@ -61,7 +63,7 @@ const normalizeConfigFormValue = (item: ConfigItem): string | number | boolean =
 }
 
 const normalizeConfigSubmitValue = (item: ConfigItem, value: string | number | boolean): string => {
-  if (item.key === 'oss_server_internal_enabled') {
+  if (booleanConfigKeys.has(item.key)) {
     return String(Boolean(value))
   }
 
@@ -71,7 +73,7 @@ const normalizeConfigSubmitValue = (item: ConfigItem, value: string | number | b
 const buildConfigRules = (item: ConfigItem) => {
   if (
     item.key === 'system_logo_key' ||
-    item.key === 'oss_server_internal_enabled'
+    booleanConfigKeys.has(item.key)
   ) {
     return []
   }
@@ -186,6 +188,7 @@ export const ConfigPage = () => {
   const groupedItems = {
     brand: items.filter((item) => brandKeys.has(item.key)),
     oss: items.filter((item) => item.key.startsWith('oss_')),
+    atelier: items.filter((item) => item.key === 'infinite_atelier_video_enabled'),
     videoLimits: items.filter((item) => videoLimitKeys.has(item.key)),
   }
 
@@ -237,7 +240,7 @@ export const ConfigPage = () => {
   }
 
   const renderInputItem = (item: ConfigItem) => {
-    if (item.key === 'oss_server_internal_enabled') {
+    if (item.key === 'oss_server_internal_enabled' || item.key === 'infinite_atelier_video_enabled') {
       return (
         <Form.Item
           key={item.key}
@@ -246,7 +249,7 @@ export const ConfigPage = () => {
           valuePropName="checked"
           tooltip="开启后仅后端上传、删除等操作使用内网 Endpoint；浏览器直传、预览和签名 URL 始终使用公网。"
         >
-          <Switch aria-label="服务端 OSS 访问网络" checkedChildren="内网" unCheckedChildren="公网" />
+          <Switch aria-label={labels[item.key]} checkedChildren={item.key === 'infinite_atelier_video_enabled' ? '开启' : '内网'} unCheckedChildren={item.key === 'infinite_atelier_video_enabled' ? '关闭' : '公网'} />
         </Form.Item>
       )
     }
@@ -573,6 +576,7 @@ export const ConfigPage = () => {
         <Form form={form} layout="vertical" onFinish={handleSave} disabled={loading}>
           <Space direction="vertical" size={20} style={{ width: '100%' }}>
             {renderBrandSection(groupedItems.brand)}
+            {groupedItems.atelier.length ? <Card title="无限画布能力" style={{ borderRadius: 20 }}><Typography.Text type="secondary">视频生成默认关闭；开启后仍只通过主项目现有视频平台服务调用，图像和音频能力未配置时保持关闭。</Typography.Text>{groupedItems.atelier.map((item) => renderInputItem(item))}</Card> : null}
             {renderVideoProviderSection()}
             {renderVideoLimitsSection()}
 

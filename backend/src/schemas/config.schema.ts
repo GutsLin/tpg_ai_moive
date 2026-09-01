@@ -38,11 +38,11 @@ export const updateConfigSchema = z.object({
           })
         }
 
-        if (item.key === 'ark_default_sync_enabled' && !isBooleanString(item.value)) {
+        if ((item.key === 'ark_default_sync_enabled' || item.key === 'infinite_atelier_video_enabled') && !isBooleanString(item.value)) {
           ctx.addIssue({
             code: z.ZodIssueCode.custom,
             path: ['value'],
-            message: 'ark_default_sync_enabled 仅支持 true 或 false',
+            message: `${item.key} 仅支持 true 或 false`,
           })
         }
 

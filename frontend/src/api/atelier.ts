@@ -2,6 +2,7 @@ import request from '../utils/request'
 
 export interface AtelierCanvas { id: number; projectId: number; createdByUserId: number; title: string; documentJson: Record<string, unknown>; version: number; createdAt: string; updatedAt: string }
 export interface AtelierPrompt { id: number; projectId: number; title: string; tags: string[]; version: number; createdByUserId: number; updatedByUserId: number; content: string; createdAt: string; updatedAt: string }
+export interface AtelierAiCapability { mediaType: 'image' | 'video' | 'audio'; enabled: boolean; operations: string[]; providerKey: string | null; providerName: string | null; models: Array<{ id: string; label: string; operations: string[]; supports: Record<string, boolean | undefined> }> }
 
 export const listAtelierCanvases = async (): Promise<AtelierCanvas[]> => (await request.get<AtelierCanvas[]>('/api/infinite-atelier/canvases')).data
 export const getAtelierCanvas = async (id: number): Promise<AtelierCanvas> => (await request.get<AtelierCanvas>(`/api/infinite-atelier/canvases/${id}`)).data
@@ -12,3 +13,4 @@ export const listAtelierPrompts = async (q?: string): Promise<AtelierPrompt[]> =
 export const createAtelierPrompt = async (payload: { title: string; content: string; tags?: string[] }): Promise<AtelierPrompt> => (await request.post<AtelierPrompt>('/api/infinite-atelier/prompts', payload)).data
 export const updateAtelierPrompt = async (id: number, payload: { version: number; title?: string; content?: string; tags?: string[] }): Promise<AtelierPrompt> => (await request.put<AtelierPrompt>(`/api/infinite-atelier/prompts/${id}`, payload)).data
 export const deleteAtelierPrompt = async (id: number) => request.delete(`/api/infinite-atelier/prompts/${id}`)
+export const getAtelierAiCapabilities = async (): Promise<{ items: AtelierAiCapability[] }> => (await request.get<{ items: AtelierAiCapability[] }>('/api/infinite-atelier/ai/capabilities')).data

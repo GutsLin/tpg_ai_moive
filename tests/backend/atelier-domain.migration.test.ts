@@ -4,6 +4,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 
 import type { Database } from '../../backend/src/db/kysely'
 import { down, up } from '../../backend/src/db/migrations/20260902090000_create_atelier_domain'
+import { up as upAiFlags, down as downAiFlags } from '../../backend/src/db/migrations/20260902100000_add_atelier_ai_feature_flags'
 
 describe('Infinite Atelier domain migration', () => {
   let database: Kysely<Database>
@@ -17,6 +18,13 @@ describe('Infinite Atelier domain migration', () => {
     await database.schema.createTable('assets')
       .addColumn('id', 'bigserial', (c) => c.primaryKey())
       .addColumn('name', 'varchar(128)', (c) => c.notNull())
+      .execute()
+    await database.schema.createTable('system_config')
+      .addColumn('key', 'varchar(128)', (c) => c.primaryKey())
+      .addColumn('value', 'text', (c) => c.notNull())
+      .addColumn('is_secret', 'boolean', (c) => c.notNull().defaultTo(false))
+      .addColumn('description', 'text')
+      .addColumn('updated_at', 'timestamptz', (c) => c.notNull().defaultTo(sql`now()`))
       .execute()
     await database.insertInto('users').values({ id: 1 } as never).execute()
     await database.insertInto('projects').values({ id: 1 } as never).execute()
@@ -57,5 +65,16 @@ describe('Infinite Atelier domain migration', () => {
     await up(database)
     await down(database)
     expect(await database.selectFrom('assets').select(['name', 'prompt_content']).execute()).toEqual([{ name: 'existing asset', prompt_content: 'existing prompt' }])
+  })
+
+  it('adds a default-off Atelier video flag and removes only the flag on rollback', async () => {
+    await up(database)
+    await upAiFlags(database)
+    expect(await database.selectFrom('system_config').select(['key', 'value']).where('key', '=', 'infinite_atelier_video_enabled').execute()).toEqual([
+      { key: 'infinite_atelier_video_enabled', value: 'false' },
+    ])
+    await downAiFlags(database)
+    expect(await database.selectFrom('assets').select('name').execute()).toEqual([{ name: 'existing asset' }])
+    expect(await database.selectFrom('system_config').select('key').where('key', '=', 'infinite_atelier_video_enabled').execute()).toEqual([])
   })
 })

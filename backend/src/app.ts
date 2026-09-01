@@ -113,7 +113,7 @@ export const createApp = (dependencies: AppDependencies = {}): Koa => {
   )
   const configRouter = createConfigRouter(configService, ossService)
   const projectsRouter = createProjectsRouter(dependencies.projectRepository, dependencies.projectMemberRepository)
-  const atelierRouter = createAtelierRouter(assetDispatcher)
+  const atelierRouter = createAtelierRouter(assetDispatcher, dependencies.configStore, dependencies.projectAccessRepository)
   const setupRouter = setupService ? createSetupRouter(setupService) : null
   const usersRouter = createUsersRouter(userService)
   const userApiKeysRouter = createUserApiKeysRouter(
