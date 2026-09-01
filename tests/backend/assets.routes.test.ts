@@ -241,6 +241,11 @@ class FakeAssetRepository implements AssetRepository {
     return this.referencedAssetIds.has(assetId)
   }
 
+  public async isReferencedByAtelier(assetId: number): Promise<boolean> {
+    const asset = this.assets.get(assetId)
+    return Boolean(asset?.tags.includes('infinite-atelier') && this.referencedAssetIds.has(assetId))
+  }
+
   public async countProjectLinks(assetId: number): Promise<number> {
     return this.assets.get(assetId)?.projectIds.length ?? 0
   }

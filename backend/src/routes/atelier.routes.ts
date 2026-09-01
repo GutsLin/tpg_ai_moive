@@ -5,6 +5,7 @@ import { authMiddleware } from '../middleware/auth'
 import { projectContextMiddleware } from '../middleware/project-context'
 import { AtelierController } from '../controllers/atelier.controller'
 import { AtelierService } from '../services/atelier.service'
+import type { AssetDispatcher } from '../services/asset.service'
 import { ForbiddenError } from '../utils/errors'
 
 const idSchema = z.object({ id: z.coerce.number().int().positive() })
@@ -17,9 +18,11 @@ export const assertAtelierWritable = (projectRole: string | null | undefined): v
   if (projectRole === 'viewer') throw new ForbiddenError('当前项目角色为只读')
 }
 
-export const createAtelierRouter = (): Router => {
+export const createAtelierRouter = (assetDispatcher?: AssetDispatcher): Router => {
   const router = new Router({ prefix: '/api/infinite-atelier' })
-  const controller = new AtelierController(new AtelierService())
+  const controller = new AtelierController(new AtelierService(undefined, async (assetIds) => {
+    await Promise.all(assetIds.map((assetId) => assetDispatcher?.enqueueDelete(assetId)))
+  }))
   router.use(authMiddleware(), projectContextMiddleware())
   const requireWritable: Middleware = async (ctx, next) => {
     assertAtelierWritable(ctx.state.projectRole)

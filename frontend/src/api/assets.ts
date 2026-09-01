@@ -147,8 +147,8 @@ export const updateAsset = async (
 
 export const deleteAsset = async (
   id: number
-): Promise<{ assetId: number; operation: 'unlinked' | 'physical_delete_queued'; remainingProjectCount: number; asset?: AssetItem }> => {
-  const response = await request.delete<{ assetId: number; operation: 'unlinked' | 'physical_delete_queued'; remainingProjectCount: number; asset?: AssetItem }>(
+): Promise<{ assetId: number; operation: 'unlinked' | 'physical_delete_queued' | 'pending_cleanup'; remainingProjectCount: number; asset?: AssetItem }> => {
+  const response = await request.delete<{ assetId: number; operation: 'unlinked' | 'physical_delete_queued' | 'pending_cleanup'; remainingProjectCount: number; asset?: AssetItem }>(
     `/api/assets/${id}`
   )
   return response.data

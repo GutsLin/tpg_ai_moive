@@ -19,8 +19,18 @@ const parseTags = (value: unknown): string[] => {
   return []
 }
 
+export const collectCanvasAssetIds = (value: unknown, result = new Set<number>()): Set<number> => {
+  if (!value || typeof value !== 'object') return result
+  if (!Array.isArray(value)) {
+    const assetId = (value as Record<string, unknown>).assetId
+    if (typeof assetId === 'number' && Number.isInteger(assetId) && assetId > 0) result.add(assetId)
+  }
+  for (const child of Object.values(value)) collectCanvasAssetIds(child, result)
+  return result
+}
+
 export class AtelierService {
-  public constructor(private readonly database: Kysely<Database> = db) {}
+  public constructor(private readonly database: Kysely<Database> = db, private readonly onAssetReferencesReleased?: (assetIds: number[]) => Promise<void>) {}
 
   async listCanvases(projectId: number, userId: number) {
     return this.database.selectFrom('atelier_canvases')
@@ -40,32 +50,67 @@ export class AtelierService {
     const documentJson = assertDocument(input.documentJson)
     const title = input.title.trim()
     if (!title) throw new ValidationAppError('画布名称不能为空')
-    const inserted = await this.database.insertInto('atelier_canvases').values({
-      project_id: projectId, created_by_user_id: userId, title, document_json: documentJson as any,
-      version: 1, status: 'active', client_stable_id: input.clientStableId ?? null, created_at: new Date(), updated_at: new Date(), deleted_at: null,
-    }).returningAll().executeTakeFirstOrThrow()
-    return this.getCanvas(projectId, userId, Number(inserted.id))
+    const canvasId = await this.database.transaction().execute(async (trx) => {
+      const inserted = await trx.insertInto('atelier_canvases').values({
+        project_id: projectId, created_by_user_id: userId, title, document_json: documentJson as any,
+        version: 1, status: 'active', client_stable_id: input.clientStableId ?? null, created_at: new Date(), updated_at: new Date(), deleted_at: null,
+      }).returning('id').executeTakeFirstOrThrow()
+      await this.syncCanvasAssetLinks(trx, projectId, Number(inserted.id), documentJson)
+      return Number(inserted.id)
+    })
+    return this.getCanvas(projectId, userId, canvasId)
   }
 
   async updateCanvas(projectId: number, userId: number, canvasId: number, input: { title?: string; documentJson?: unknown; version: number }) {
     const documentJson = input.documentJson === undefined ? undefined : assertDocument(input.documentJson)
-    const current = await this.database.selectFrom('atelier_canvases').select(['version'])
-      .where('project_id', '=', projectId).where('id', '=', canvasId).where('created_by_user_id', '=', userId).where('status', '=', 'active').executeTakeFirst()
-    if (!current) throw new NotFoundError('画布不存在')
-    if (current.version !== input.version) throw new ConflictError('画布已被修改，请刷新后重试')
-    const result = await this.database.updateTable('atelier_canvases').set({
-      title: input.title === undefined ? undefined : input.title.trim(), document_json: documentJson as any,
-      version: sql`version + 1`, updated_at: new Date(),
-    }).where('project_id', '=', projectId).where('id', '=', canvasId).where('created_by_user_id', '=', userId).where('status', '=', 'active').where('version', '=', input.version).returningAll().executeTakeFirst()
-    if (!result) throw new ConflictError('画布已被修改，请刷新后重试')
+    const releasedAssetIds = await this.database.transaction().execute(async (trx) => {
+      const current = await trx.selectFrom('atelier_canvases').select(['version'])
+        .where('project_id', '=', projectId).where('id', '=', canvasId).where('created_by_user_id', '=', userId).where('status', '=', 'active').forUpdate().executeTakeFirst()
+      if (!current) throw new NotFoundError('画布不存在')
+      if (current.version !== input.version) throw new ConflictError('画布已被修改，请刷新后重试')
+      const result = await trx.updateTable('atelier_canvases').set({
+        title: input.title === undefined ? undefined : input.title.trim(), document_json: documentJson as any,
+        version: sql`version + 1`, updated_at: new Date(),
+      }).where('project_id', '=', projectId).where('id', '=', canvasId).where('created_by_user_id', '=', userId).where('status', '=', 'active').where('version', '=', input.version).executeTakeFirst()
+      if (Number(result.numUpdatedRows) !== 1) throw new ConflictError('画布已被修改，请刷新后重试')
+      if (documentJson !== undefined) return await this.syncCanvasAssetLinks(trx, projectId, canvasId, documentJson)
+      return []
+    })
+    await this.notifyPendingCleanup(releasedAssetIds)
     return this.getCanvas(projectId, userId, canvasId)
   }
 
   async deleteCanvas(projectId: number, userId: number, canvasId: number) {
-    const result = await this.database.updateTable('atelier_canvases').set({ status: 'deleted', deleted_at: new Date(), updated_at: new Date() })
-      .where('project_id', '=', projectId).where('id', '=', canvasId).where('created_by_user_id', '=', userId).where('status', '=', 'active').executeTakeFirst()
-    if (!result || Number(result.numUpdatedRows) !== 1) throw new NotFoundError('画布不存在')
+    const releasedAssetIds = await this.database.transaction().execute(async (trx) => {
+      const linked = await trx.selectFrom('atelier_canvas_asset_links').select('asset_id').where('project_id', '=', projectId).where('canvas_id', '=', canvasId).execute()
+      const result = await trx.updateTable('atelier_canvases').set({ status: 'deleted', deleted_at: new Date(), updated_at: new Date() })
+        .where('project_id', '=', projectId).where('id', '=', canvasId).where('created_by_user_id', '=', userId).where('status', '=', 'active').executeTakeFirst()
+      if (Number(result.numUpdatedRows) !== 1) throw new NotFoundError('画布不存在')
+      await trx.deleteFrom('atelier_canvas_asset_links').where('project_id', '=', projectId).where('canvas_id', '=', canvasId).execute()
+      return linked.map((row) => Number(row.asset_id))
+    })
+    await this.notifyPendingCleanup(releasedAssetIds)
     return { ok: true }
+  }
+
+  private async syncCanvasAssetLinks(executor: Kysely<Database>, projectId: number, canvasId: number, documentJson: JsonValue): Promise<number[]> {
+    const assetIds = [...collectCanvasAssetIds(documentJson)]
+    if (assetIds.length) {
+      const valid = await executor.selectFrom('project_assets').select('asset_id').where('project_id', '=', projectId).where('asset_id', 'in', assetIds).execute()
+      if (new Set(valid.map((row) => Number(row.asset_id))).size !== assetIds.length) throw new NotFoundError('画布引用的项目资产不存在')
+    }
+    const previous = await executor.selectFrom('atelier_canvas_asset_links').select('asset_id').where('project_id', '=', projectId).where('canvas_id', '=', canvasId).execute()
+    const nextSet = new Set(assetIds)
+    const released = previous.map((row) => Number(row.asset_id)).filter((assetId) => !nextSet.has(assetId))
+    await executor.deleteFrom('atelier_canvas_asset_links').where('project_id', '=', projectId).where('canvas_id', '=', canvasId).execute()
+    if (assetIds.length) await executor.insertInto('atelier_canvas_asset_links').values(assetIds.map((assetId, sequenceNo) => ({ project_id: projectId, canvas_id: canvasId, asset_id: assetId, role: 'canvas_media', sequence_no: sequenceNo, created_at: new Date() }))).execute()
+    return released
+  }
+
+  private async notifyPendingCleanup(assetIds: number[]) {
+    if (!assetIds.length || !this.onAssetReferencesReleased) return
+    const pending = await this.database.selectFrom('assets').select('id').where('id', 'in', assetIds).where('ark_status', '=', 'deleting').execute()
+    if (pending.length) await this.onAssetReferencesReleased(pending.map((row) => Number(row.id)))
   }
 
   async listPrompts(projectId: number, query?: string) {

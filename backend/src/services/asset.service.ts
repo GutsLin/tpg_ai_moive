@@ -94,6 +94,8 @@ export interface AssetRepository {
   listByStatuses(statuses: string[]): Promise<AssetRecord[]>
   deleteById(id: number): Promise<void>
   isReferenced(assetId: number, arkAssetId: string | null): Promise<boolean>
+  /** Returns true only when an active Infinite Atelier canvas references the asset. */
+  isReferencedByAtelier?(assetId: number): Promise<boolean>
   countProjectLinks(assetId: number): Promise<number>
   getCategory(
     projectId: number,
@@ -422,6 +424,10 @@ export class KyselyAssetRepository implements AssetRepository {
     return await this.isReferencedWithExecutor(this.database, assetId, arkAssetId)
   }
 
+  public async isReferencedByAtelier(assetId: number): Promise<boolean> {
+    return await this.isReferencedByAtelierWithExecutor(this.database, assetId)
+  }
+
   public async countProjectLinks(assetId: number): Promise<number> {
     const row = await this.database
       .selectFrom('project_assets')
@@ -543,6 +549,12 @@ export class KyselyAssetRepository implements AssetRepository {
     assetId: number,
     arkAssetId: string | null
   ): Promise<boolean> {
+    const atelierLinksTable = await sql<{ atelier_canvas_asset_links: string | null }>`
+      select to_regclass('public.atelier_canvas_asset_links') as atelier_canvas_asset_links
+    `.execute(executor)
+
+    if (atelierLinksTable.rows[0]?.atelier_canvas_asset_links && await this.isReferencedByAtelierWithExecutor(executor, assetId)) return true
+
     const videoTaskAssetsTable = await sql<{ video_task_assets: string | null }>`
       select to_regclass('public.video_task_assets') as video_task_assets
     `.execute(executor)
@@ -575,6 +587,21 @@ export class KyselyAssetRepository implements AssetRepository {
     `.execute(executor)
 
     return legacyResult.rows.length > 0
+  }
+
+  private async isReferencedByAtelierWithExecutor(executor: Kysely<Database>, assetId: number): Promise<boolean> {
+    const table = await sql<{ exists: string | null }>`
+      select to_regclass('public.atelier_canvas_asset_links') as exists
+    `.execute(executor)
+    if (!table.rows[0]?.exists) return false
+    const reference = await executor
+      .selectFrom('atelier_canvas_asset_links')
+      .innerJoin('atelier_canvases', 'atelier_canvases.id', 'atelier_canvas_asset_links.canvas_id')
+      .select('atelier_canvas_asset_links.asset_id')
+      .where('atelier_canvas_asset_links.asset_id', '=', assetId)
+      .where('atelier_canvases.status', '=', 'active')
+      .executeTakeFirst()
+    return Boolean(reference)
   }
 
   private async hasTableWithExecutor(executor: Kysely<Database>, tableName: string): Promise<boolean> {
@@ -717,6 +744,10 @@ export class AssetService {
     linkProjectIds?: number[]
     promptContent?: string | null
   }) {
+    if (input.tags.includes('infinite-atelier')) {
+      const expected = `/projects/${input.projectId}/infinite-atelier/`
+      if (!input.ossKey.includes(expected)) throw new ValidationAppError('无限画布素材必须使用当前项目隔离对象路径')
+    }
     assertProjectPermission(canUploadAsset(input.projectRole), '当前项目角色不允许上传素材')
 
     const extraProjectIds = [...new Set((input.linkProjectIds ?? []).filter((projectId) => projectId !== input.projectId))]
@@ -989,7 +1020,9 @@ export class AssetService {
       }
     }
 
-    if (await this.repository.isReferenced(input.assetId, asset.arkAssetId)) {
+    const referenced = await this.repository.isReferenced(input.assetId, asset.arkAssetId)
+    const atelierReferenced = await this.repository.isReferencedByAtelier?.(input.assetId) ?? false
+    if (referenced && !atelierReferenced) {
       throw new ConflictError('素材已被视频任务引用，无法物理删除')
     }
 
@@ -1001,7 +1034,7 @@ export class AssetService {
     await this.dispatcher.enqueueDelete(input.assetId)
     return {
       assetId: input.assetId,
-      operation: 'physical_delete_queued',
+      operation: atelierReferenced ? 'pending_cleanup' : 'physical_delete_queued',
       remainingProjectCount: 1,
       asset: updated,
     }
@@ -1161,6 +1194,7 @@ export class AssetService {
     syncMode: AssetSyncMode,
     groupSyncEnabled: boolean | null
   ): Promise<boolean> {
+    if (assetType !== 'Image') return false
     return await this.computeEffectiveSync(syncMode, groupSyncEnabled)
   }
 
@@ -1179,7 +1213,9 @@ export class AssetService {
 
   private async toAssetResponse(asset: AssetRecord, defaultSyncEnabled: boolean) {
     const effectiveSync =
-      asset.groupSyncEnabled === false
+      asset.assetType !== 'Image'
+        ? false
+        : asset.groupSyncEnabled === false
         ? false
         : asset.syncMode === 'enabled'
           ? true

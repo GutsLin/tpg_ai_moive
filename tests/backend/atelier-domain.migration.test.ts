@@ -42,6 +42,7 @@ describe('Infinite Atelier domain migration', () => {
     }).execute()
     const canvas = await database.selectFrom('atelier_canvases').select(['project_id', 'created_by_user_id']).executeTakeFirstOrThrow()
     expect(canvas).toMatchObject({ project_id: 1, created_by_user_id: 1 })
+    await expect(database.selectFrom('atelier_canvas_asset_links').selectAll().execute()).resolves.toEqual([])
 
     await down(database)
 

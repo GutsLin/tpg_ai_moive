@@ -121,6 +121,15 @@ export interface AtelierCanvasObjectLinkTable {
   created_at: TimestampColumn
 }
 
+export interface AtelierCanvasAssetLinkTable {
+  project_id: number
+  canvas_id: number
+  asset_id: number
+  role: string
+  sequence_no: number
+  created_at: TimestampColumn
+}
+
 export interface AtelierGenerationTaskTable {
   id: ColumnType<number, never, never>
   project_id: number
@@ -288,6 +297,7 @@ export interface Database {
   atelier_prompt_versions: AtelierPromptVersionTable
   atelier_storage_objects: AtelierStorageObjectTable
   atelier_canvas_object_links: AtelierCanvasObjectLinkTable
+  atelier_canvas_asset_links: AtelierCanvasAssetLinkTable
   atelier_generation_tasks: AtelierGenerationTaskTable
   atelier_generation_outputs: AtelierGenerationOutputTable
 }

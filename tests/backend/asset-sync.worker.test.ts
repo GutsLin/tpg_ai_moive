@@ -14,6 +14,7 @@ class FakeAssetRepository implements AssetRepository {
   private assets = new Map<number, AssetRecord>()
   public readonly updates: Array<{ id: number; patch: Partial<AssetRecord> }> = []
   public readonly deletedIds: number[] = []
+  public referenced = false
 
   public seed(assets: AssetRecord[]) {
     this.assets = new Map(assets.map((asset) => [asset.id, asset]))
@@ -88,7 +89,7 @@ class FakeAssetRepository implements AssetRepository {
   }
 
   public async isReferenced(): Promise<boolean> {
-    return false
+    return this.referenced
   }
 
   public async countProjectLinks(): Promise<number> {
@@ -560,6 +561,58 @@ describe('asset-sync.worker', () => {
     expect(arkClient.deleteAsset).toHaveBeenCalledWith('asset-20260407160759-vnfl4', 'xcyj')
     expect(repository.deletedIds).toEqual([5])
     expect(repository.updates).toEqual([])
+  })
+
+  it('素材仍被画布引用时保持 deleting，且不删除 OSS 或数据库记录', async () => {
+    repository.seed([
+      {
+        id: 6,
+        createdByUserId: 1,
+        sourceProjectId: 101,
+        name: '画布引用素材',
+        assetType: 'Image',
+        categoryId: null,
+        groupSyncEnabled: null,
+        syncMode: 'disabled',
+        ossKey: 'assets/2026/09/02/projects/101/infinite-atelier/referenced.png',
+        arkGroupId: null,
+        arkAssetId: null,
+        arkStatus: 'deleting',
+        arkError: null,
+        tags: ['infinite-atelier'],
+        projectIds: [101],
+        projectNames: ['项目101'],
+        promptContent: 'reference prompt',
+        createdAt: new Date('2026-09-02T00:00:00.000Z'),
+        updatedAt: new Date('2026-09-02T00:00:00.000Z'),
+      },
+    ])
+    repository.referenced = true
+
+    const processor = createAssetDeleteProcessor({
+      repository,
+      ossService,
+      arkClient: {
+        createAsset: vi.fn(),
+        getAsset: vi.fn(),
+        deleteAsset: vi.fn(),
+      },
+      getProjectName: async () => 'project-101',
+    })
+
+    await processor({ assetId: 6 })
+
+    expect(ossService.deletedKeys).toEqual([])
+    expect(repository.deletedIds).toEqual([])
+    expect(repository.updates).toContainEqual({
+      id: 6,
+      patch: { arkStatus: 'deleting', arkError: '等待画布或任务引用解除' },
+    })
+
+    repository.referenced = false
+    await processor({ assetId: 6 })
+    expect(ossService.deletedKeys).toEqual(['assets/2026/09/02/projects/101/infinite-atelier/referenced.png'])
+    expect(repository.deletedIds).toEqual([6])
   })
 
   it('重新补推删除任务时会优先 retry 已失败的同 jobId 任务', async () => {

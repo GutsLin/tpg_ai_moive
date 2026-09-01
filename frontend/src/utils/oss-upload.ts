@@ -4,21 +4,24 @@ import { getAssetStsToken } from '../api/assets'
 
 const normalizeFileName = (name: string) => name.replace(/[^\w.-]+/g, '-').toLowerCase()
 
-const buildObjectKey = (prefix: string, file: File) => {
+const buildObjectKey = (prefix: string, file: File, options?: { projectId: number; namespace: 'infinite-atelier' }) => {
   const identifier =
     typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
       ? crypto.randomUUID()
       : `${Date.now()}-${Math.random().toString(16).slice(2)}`
 
-  return `${prefix}${identifier}-${normalizeFileName(file.name)}`
+  const normalizedPrefix = `${prefix.replace(/\/+$/, '')}/`
+  const isolatedPrefix = options ? `${normalizedPrefix}projects/${options.projectId}/${options.namespace}/` : normalizedPrefix
+  return `${isolatedPrefix}${identifier}-${normalizeFileName(file.name)}`
 }
 
 export const uploadFileToOss = async (
   file: File,
-  onProgress?: (percent: number) => void
+  onProgress?: (percent: number) => void,
+  options?: { projectId: number; namespace: 'infinite-atelier' }
 ): Promise<{ ossKey: string }> => {
   const sts = await getAssetStsToken()
-  const ossKey = buildObjectKey(sts.keyPrefix, file)
+  const ossKey = buildObjectKey(sts.keyPrefix, file, options)
 
   const client = new (OSS as any)({
     region: sts.region,

@@ -280,6 +280,11 @@ export const createAssetDeleteProcessor =
       return
     }
 
+    if (await repository.isReferenced(asset.id, asset.arkAssetId)) {
+      await repository.update(assetId, { arkStatus: 'deleting', arkError: '等待画布或任务引用解除' })
+      return
+    }
+
     try {
       await ossService.deleteObject(asset.ossKey)
     } catch (error) {
