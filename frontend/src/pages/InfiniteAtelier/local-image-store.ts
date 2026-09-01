@@ -31,6 +31,17 @@ export const getLocalImage = async (key: string): Promise<Blob | null> => {
   return result ?? null
 }
 
+export const deleteLocalImage = async (key: string): Promise<void> => {
+  const database = await openDb()
+  await new Promise<void>((resolve, reject) => {
+    const transaction = database.transaction(STORE_NAME, 'readwrite')
+    transaction.objectStore(STORE_NAME).delete(key)
+    transaction.oncomplete = () => resolve()
+    transaction.onerror = () => reject(transaction.error)
+  })
+  database.close()
+}
+
 export const transformLocalImage = async (key: string, operation: 'crop' | 'upscale' | 'mask' | 'split-left' | 'split-right') => {
   const blob = await getLocalImage(key)
   if (!blob) throw new Error('本地图片缓存不存在，请重新导入')

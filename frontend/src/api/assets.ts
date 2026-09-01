@@ -82,6 +82,7 @@ export interface CreateAssetResponse {
   tags: string[]
   createdAt: string
   updatedAt: string
+  promptContent?: string | null
 }
 
 export interface AssetQueryParams {

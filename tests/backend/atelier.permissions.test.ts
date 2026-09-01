@@ -20,6 +20,8 @@ describe('Infinite Atelier permissions', () => {
     await database.schema.createTable('atelier_canvas_asset_links').addColumn('project_id', 'bigint').addColumn('canvas_id', 'bigint').addColumn('asset_id', 'bigint').addColumn('role', 'varchar(50)').addColumn('sequence_no', 'integer').addColumn('created_at', 'timestamptz').execute()
     service = new AtelierService(database)
     await database.insertInto('atelier_canvases').values({ project_id: 7, created_by_user_id: 11, title: 'A', document_json: sql`'{}'::jsonb`, version: 1, status: 'active', client_stable_id: null, created_at: new Date(), updated_at: new Date(), deleted_at: null }).execute()
+    await database.insertInto('atelier_prompts').values({ project_id: 7, title: '共享提示词', tags: sql`'[]'::jsonb`, current_version: 1, created_by_user_id: 11, updated_by_user_id: 11, status: 'active', client_stable_id: null, created_at: new Date(), updated_at: new Date(), deleted_at: null }).execute()
+    await database.insertInto('atelier_prompt_versions').values({ project_id: 7, prompt_id: 1, version: 1, content: 'cinematic portrait', updated_by_user_id: 11, created_at: new Date() }).execute()
   })
 
   afterEach(async () => database.destroy())
@@ -35,5 +37,14 @@ describe('Infinite Atelier permissions', () => {
     expect(() => assertAtelierWritable('viewer')).toThrowError(/只读/)
     expect(() => assertAtelierWritable('member')).not.toThrow()
     expect(() => assertAtelierWritable('manager')).not.toThrow()
+  })
+
+  it('同项目成员可读取提示词，但只有创建者或 manager 可修改删除', async () => {
+    await expect(service.listPrompts(7)).resolves.toHaveLength(1)
+    await expect(service.updatePrompt(7, 12, 'member', 1, { version: 1, content: 'hijack' })).rejects.toMatchObject({ status: 403 })
+    await expect(service.deletePrompt(7, 12, 'member', 1)).rejects.toMatchObject({ status: 403 })
+    await expect(service.updatePrompt(7, 12, 'manager', 1, { version: 1, content: 'manager revision' })).resolves.toMatchObject({ version: 2, content: 'manager revision' })
+    await expect(service.deletePrompt(7, 12, 'manager', 1)).resolves.toMatchObject({ ok: true })
+    await expect(service.listPrompts(7)).resolves.toHaveLength(0)
   })
 })
