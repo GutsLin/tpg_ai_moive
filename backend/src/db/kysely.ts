@@ -55,6 +55,105 @@ export interface AssetsTable {
   tags: JsonStringArrayColumn
   created_at: TimestampColumn
   updated_at: TimestampColumn
+  prompt_content: string | null
+}
+
+export interface AtelierCanvasTable {
+  id: ColumnType<number, never, never>
+  project_id: number
+  created_by_user_id: number
+  title: string
+  document_json: NullableJsonValueColumn
+  version: number
+  status: 'active' | 'deleted'
+  client_stable_id: string | null
+  created_at: TimestampColumn
+  updated_at: TimestampColumn
+  deleted_at: TimestampColumn | null
+}
+
+export interface AtelierPromptTable {
+  id: ColumnType<number, never, never>
+  project_id: number
+  title: string
+  tags: JsonStringArrayColumn
+  current_version: number
+  created_by_user_id: number
+  updated_by_user_id: number
+  status: 'active' | 'deleted'
+  client_stable_id: string | null
+  created_at: TimestampColumn
+  updated_at: TimestampColumn
+  deleted_at: TimestampColumn | null
+}
+
+export interface AtelierPromptVersionTable {
+  project_id: number
+  prompt_id: number
+  version: number
+  content: string
+  updated_by_user_id: number
+  created_at: TimestampColumn
+}
+
+export interface AtelierStorageObjectTable {
+  id: ColumnType<number, never, never>
+  project_id: number
+  created_by_user_id: number
+  object_key: string
+  category: string
+  content_type: string
+  bytes: number
+  etag: string | null
+  metadata: NullableJsonValueColumn
+  state: 'active' | 'pending_delete' | 'deleted'
+  created_at: TimestampColumn
+  updated_at: TimestampColumn
+  deleted_at: TimestampColumn | null
+}
+
+export interface AtelierCanvasObjectLinkTable {
+  project_id: number
+  canvas_id: number
+  object_id: number
+  role: string
+  sequence_no: number
+  created_at: TimestampColumn
+}
+
+export interface AtelierGenerationTaskTable {
+  id: ColumnType<number, never, never>
+  project_id: number
+  created_by_user_id: number
+  canvas_id: number | null
+  canvas_version: number | null
+  prompt_id: number | null
+  prompt_version: number | null
+  operation: string
+  media_type: 'image' | 'video' | 'audio'
+  channel_key: string | null
+  model: string
+  idempotency_key: string
+  request_json: NullableJsonValueColumn
+  status: string
+  progress_percent: number
+  provider_task_id: string | null
+  error_code: string | null
+  error_message: string | null
+  created_at: TimestampColumn
+  updated_at: TimestampColumn
+}
+
+export interface AtelierGenerationOutputTable {
+  id: ColumnType<number, never, never>
+  project_id: number
+  task_id: number
+  sequence_no: number
+  object_id: number | null
+  content_type: string
+  bytes: number | null
+  status: string
+  created_at: TimestampColumn
 }
 
 export interface VideoTasksTable {
@@ -184,6 +283,13 @@ export interface Database {
   video_task_assets: VideoTaskAssetsTable
   video_generation_logs: VideoGenerationLogsTable
   user_api_keys: UserApiKeysTable
+  atelier_canvases: AtelierCanvasTable
+  atelier_prompts: AtelierPromptTable
+  atelier_prompt_versions: AtelierPromptVersionTable
+  atelier_storage_objects: AtelierStorageObjectTable
+  atelier_canvas_object_links: AtelierCanvasObjectLinkTable
+  atelier_generation_tasks: AtelierGenerationTaskTable
+  atelier_generation_outputs: AtelierGenerationOutputTable
 }
 
 const createPool = (): Pool =>

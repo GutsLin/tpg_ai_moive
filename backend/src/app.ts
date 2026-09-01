@@ -18,6 +18,7 @@ import { createUserApiKeysRouter } from './routes/user-api-keys.routes'
 import { createUsersRouter } from './routes/users.routes'
 import { createVideoGenerationLogsRouter } from './routes/video-generation-logs.routes'
 import { createVideosRouter } from './routes/videos.routes'
+import { createAtelierRouter } from './routes/atelier.routes'
 import type { ArkAssetClient } from './lib/ark-aksk'
 import { ProviderAssetClient } from './lib/toapis-avatar'
 import { type AssetDispatcher, type AssetRepository } from './services/asset.service'
@@ -112,6 +113,7 @@ export const createApp = (dependencies: AppDependencies = {}): Koa => {
   )
   const configRouter = createConfigRouter(configService, ossService)
   const projectsRouter = createProjectsRouter(dependencies.projectRepository, dependencies.projectMemberRepository)
+  const atelierRouter = createAtelierRouter()
   const setupRouter = setupService ? createSetupRouter(setupService) : null
   const usersRouter = createUsersRouter(userService)
   const userApiKeysRouter = createUserApiKeysRouter(
@@ -162,6 +164,8 @@ export const createApp = (dependencies: AppDependencies = {}): Koa => {
   app.use(userApiKeysRouter.allowedMethods())
   app.use(projectsRouter.routes())
   app.use(projectsRouter.allowedMethods())
+  app.use(atelierRouter.routes())
+  app.use(atelierRouter.allowedMethods())
   app.use(router.routes())
   app.use(router.allowedMethods())
 
