@@ -3,6 +3,9 @@ import { sql, type Kysely } from 'kysely'
 import type { Database } from '../kysely'
 
 export const up = async (db: Kysely<Database>): Promise<void> => {
+  const promptColumn = await sql<{ exists: boolean }>`select exists (select 1 from information_schema.columns where table_schema = 'public' and table_name = 'assets' and column_name = 'prompt_content')`.execute(db)
+  await sql`create table if not exists atelier_migration_metadata (key varchar(200) primary key, value varchar(50) not null)`.execute(db)
+  await sql`insert into atelier_migration_metadata (key, value) values ('assets.prompt_content', ${promptColumn.rows[0]?.exists ? 'preexisting' : 'created'}) on conflict (key) do nothing`.execute(db)
   await sql`alter table assets add column if not exists prompt_content text`.execute(db)
 
   await db.schema.createTable('atelier_canvases').ifNotExists()
@@ -119,5 +122,7 @@ export const down = async (db: Kysely<Database>): Promise<void> => {
   await db.schema.dropTable('atelier_prompts').ifExists().execute()
   await db.schema.dropIndex('idx_atelier_canvases_owner').ifExists().execute()
   await db.schema.dropTable('atelier_canvases').ifExists().execute()
-  await sql`alter table assets drop column if exists prompt_content`.execute(db)
+  const marker = await sql<{ value: string }>`select value from atelier_migration_metadata where key = 'assets.prompt_content'`.execute(db)
+  if (marker.rows[0]?.value === 'created') await sql`alter table assets drop column if exists prompt_content`.execute(db)
+  await sql`drop table if exists atelier_migration_metadata`.execute(db)
 }

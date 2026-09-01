@@ -49,4 +49,12 @@ describe('Infinite Atelier domain migration', () => {
     await expect(database.schema.createTable('atelier_canvases').addColumn('id', 'bigint').execute()).resolves.toBeUndefined()
     await expect(database.schema.alterTable('assets').addColumn('prompt_content', 'text').execute()).resolves.toBeUndefined()
   })
+
+  it('preserves a prompt_content column that existed before the Atelier migration', async () => {
+    await database.schema.alterTable('assets').addColumn('prompt_content', 'text').execute()
+    await database.updateTable('assets').set({ prompt_content: 'existing prompt' }).execute()
+    await up(database)
+    await down(database)
+    expect(await database.selectFrom('assets').select(['name', 'prompt_content']).execute()).toEqual([{ name: 'existing asset', prompt_content: 'existing prompt' }])
+  })
 })
