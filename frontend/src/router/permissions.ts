@@ -10,11 +10,12 @@ export const routePermMap = {
   '/users': 'users',
   '/logs': 'logs',
   '/config': 'config',
+  '/infinite-atelier': 'assets',
 } as const
 
-const routeOrder = ['/assets', '/videos', '/analytics', '/projects', '/users', '/logs', '/config'] as const
+const routeOrder = ['/assets', '/infinite-atelier', '/videos', '/analytics', '/projects', '/users', '/logs', '/config'] as const
 const adminOnlyRoutes = new Set<string>(['/projects', '/users', '/logs', '/config'])
-const projectScopedRoutes = new Set<string>(['/assets', '/videos', '/analytics', '/logs'])
+const projectScopedRoutes = new Set<string>(['/assets', '/infinite-atelier', '/videos', '/analytics', '/logs'])
 
 export const isAdminOnlyRoute = (route: string) => adminOnlyRoutes.has(route)
 export const isProjectScopedRoute = (route: string) => projectScopedRoutes.has(route)

@@ -1,5 +1,6 @@
 import {
   AppstoreOutlined,
+  BorderOuterOutlined,
   BarChartOutlined,
   DownOutlined,
   FolderOpenOutlined,
@@ -27,6 +28,7 @@ const { Sider, Content } = Layout
 
 const menuConfig = [
   { key: 'assets', label: '素材管理', path: '/assets', icon: <AppstoreOutlined /> },
+  { key: 'infinite-atelier', label: '无限画布', path: '/infinite-atelier', icon: <BorderOuterOutlined /> },
   { key: 'videos', label: '视频生成', path: '/videos', icon: <PlayCircleOutlined /> },
   { key: 'analytics', label: '数据统计', path: '/analytics', icon: <BarChartOutlined /> },
   { key: 'projects', label: '项目管理', path: '/projects', icon: <FolderOutlined /> },

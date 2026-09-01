@@ -28,6 +28,7 @@ export interface AssetItem {
   tags: string[]
   createdAt: string
   updatedAt: string
+  promptContent?: string | null
 }
 
 export interface AssetListResponse {
@@ -56,6 +57,7 @@ export interface CreateAssetPayload {
   ossKey: string
   tags: string[]
   linkProjectIds?: number[]
+  promptContent?: string | null
 }
 
 export interface CreateAssetResponse {

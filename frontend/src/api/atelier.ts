@@ -1,0 +1,14 @@
+import request from '../utils/request'
+
+export interface AtelierCanvas { id: number; projectId: number; createdByUserId: number; title: string; documentJson: Record<string, unknown>; version: number; createdAt: string; updatedAt: string }
+export interface AtelierPrompt { id: number; projectId: number; title: string; tags: string[]; version: number; createdByUserId: number; updatedByUserId: number; content: string; createdAt: string; updatedAt: string }
+
+export const listAtelierCanvases = async (): Promise<AtelierCanvas[]> => (await request.get<AtelierCanvas[]>('/api/infinite-atelier/canvases')).data
+export const getAtelierCanvas = async (id: number): Promise<AtelierCanvas> => (await request.get<AtelierCanvas>(`/api/infinite-atelier/canvases/${id}`)).data
+export const createAtelierCanvas = async (payload: { title: string; documentJson: Record<string, unknown> }): Promise<AtelierCanvas> => (await request.post<AtelierCanvas>('/api/infinite-atelier/canvases', payload)).data
+export const updateAtelierCanvas = async (id: number, payload: { version: number; title?: string; documentJson?: Record<string, unknown> }): Promise<AtelierCanvas> => (await request.put<AtelierCanvas>(`/api/infinite-atelier/canvases/${id}`, payload)).data
+export const deleteAtelierCanvas = async (id: number) => request.delete(`/api/infinite-atelier/canvases/${id}`)
+export const listAtelierPrompts = async (q?: string): Promise<AtelierPrompt[]> => (await request.get<AtelierPrompt[]>(`/api/infinite-atelier/prompts${q ? `?q=${encodeURIComponent(q)}` : ''}`)).data
+export const createAtelierPrompt = async (payload: { title: string; content: string; tags?: string[] }): Promise<AtelierPrompt> => (await request.post<AtelierPrompt>('/api/infinite-atelier/prompts', payload)).data
+export const updateAtelierPrompt = async (id: number, payload: { version: number; title?: string; content?: string; tags?: string[] }): Promise<AtelierPrompt> => (await request.put<AtelierPrompt>(`/api/infinite-atelier/prompts/${id}`, payload)).data
+export const deleteAtelierPrompt = async (id: number) => request.delete(`/api/infinite-atelier/prompts/${id}`)

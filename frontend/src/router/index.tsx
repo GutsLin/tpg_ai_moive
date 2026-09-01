@@ -17,6 +17,7 @@ import { SetupPage } from '../pages/Setup'
 import { SetupHelpPage } from '../pages/SetupHelp'
 import { UsersPage } from '../pages/Users'
 import { VideosPage } from '../pages/Videos'
+import { InfiniteAtelierPage } from '../pages/InfiniteAtelier'
 import { useBrand } from '../stores/brand'
 import { resolveSystemName } from '../utils/branding'
 import { getDefaultRouteForUser, isAdminOnlyRoute, isProjectScopedRoute, noAccessRoute, routePermMap } from './permissions'
@@ -242,6 +243,14 @@ const AppRoutes = () => {
         element={ensureInitialized(
           <ProtectedRoute path="/videos" brandingName={brandingName}>
             <VideosPage />
+          </ProtectedRoute>
+        )}
+      />
+      <Route
+        path="/infinite-atelier/*"
+        element={ensureInitialized(
+          <ProtectedRoute path="/infinite-atelier" brandingName={brandingName}>
+            <InfiniteAtelierPage />
           </ProtectedRoute>
         )}
       />
