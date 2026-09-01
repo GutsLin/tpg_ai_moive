@@ -350,6 +350,7 @@ export const AssetCard = ({
   selectable,
   selected,
   selectDisabled,
+  selectDisabledReason,
   onSelect,
 }: {
   asset: AssetItem
@@ -361,6 +362,7 @@ export const AssetCard = ({
   selectable?: boolean
   selected?: boolean
   selectDisabled?: boolean
+  selectDisabledReason?: string
   onSelect?: (asset: AssetItem, checked: boolean) => void
 }) => {
   const status = statusMeta[asset.arkStatus]
@@ -397,7 +399,7 @@ export const AssetCard = ({
       cover={
         selectable ? (
           <div style={{ position: 'relative' }}>
-            <Tooltip title={selectDisabled ? '该素材已在当前平台同步，无需重复操作' : ''}>
+            <Tooltip title={selectDisabled ? (selectDisabledReason ?? '该素材当前不可选择') : ''}>
               <span>
                 <Checkbox
                   checked={selected}

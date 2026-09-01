@@ -108,6 +108,10 @@ export class AssetsController {
     ctx.body = ok(await this.assetService.syncAssetsByIds(payload.assetIds))
   }
 
+  public batchUnsync = async (ctx: Context, payload: { assetIds: number[] }) => {
+    ctx.body = ok(await this.assetService.unsyncAssetsByIds(payload.assetIds))
+  }
+
   public linkProjects = async (ctx: Context, id: number, payload: { projectIds: number[] }) => {
     ctx.body = ok(
       await this.assetService.linkAssetProjects({

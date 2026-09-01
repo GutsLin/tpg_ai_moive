@@ -94,5 +94,15 @@ export const createAssetsRouter = (
     await controller.batchSync(ctx, payload)
   })
 
+  router.post('/batch-unsync', async (ctx) => {
+    const isAdmin = ctx.state.user?.role === 'admin'
+    const isManager = ctx.state.projectRole === 'manager'
+    if (!isAdmin && !isManager) {
+      ctx.throw(403, '仅项目管理员或系统管理员可执行取消同步')
+    }
+    const payload = batchSyncSchema.parse(ctx.request.body)
+    await controller.batchUnsync(ctx, payload)
+  })
+
   return router
 }

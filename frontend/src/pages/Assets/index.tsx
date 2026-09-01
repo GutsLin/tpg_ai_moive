@@ -4,6 +4,7 @@ import {
   LoadingOutlined,
   ReloadOutlined,
   SearchOutlined,
+  StopOutlined,
   SyncOutlined,
 } from '@ant-design/icons'
 import { Button, Checkbox, Empty, Input, Modal, Pagination, Select, Skeleton, Space, Tabs, Typography, message } from 'antd'
@@ -14,6 +15,7 @@ import {
   deleteAsset,
   getAssets,
   syncAssets,
+  unsyncAssets,
   type AssetItem,
   type AssetStatus,
   type AssetType,
@@ -69,9 +71,11 @@ export const AssetsPage = () => {
   const [assetTotal, setAssetTotal] = useState(0)
   const [messageApi, contextHolder] = message.useMessage()
   const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set())
-  const [selectMode, setSelectMode] = useState(false)
+  const [selectMode, setSelectMode] = useState<'sync' | 'unsync' | null>(null)
   const [batchSyncOpen, setBatchSyncOpen] = useState(false)
+  const [batchUnsyncOpen, setBatchUnsyncOpen] = useState(false)
   const [batchSyncing, setBatchSyncing] = useState(false)
+  const [batchUnsyncing, setBatchUnsyncing] = useState(false)
   const [activeProviderName, setActiveProviderName] = useState('')
 
   const loadCategories = async () => {
@@ -228,13 +232,24 @@ export const AssetsPage = () => {
     })
   }
 
-  // 判断素材是否已在当前平台同步成功（不可重复同步）
-  const isAssetAlreadySynced = (asset: AssetItem): boolean => {
-    return asset.arkStatus === 'active' && Boolean(asset.arkAssetId)
+  // 同步中的素材不可重复入队（避免与 worker 竞态）；已同步（active）素材允许重新选中同步
+  const isAssetSyncing = (asset: AssetItem): boolean => {
+    return asset.arkStatus === 'processing' || asset.arkStatus === 'pending' || asset.arkStatus === 'deleting'
+  }
+
+  // 已绑定素材库（有 pa_id）的素材才可取消同步
+  const isAssetSynced = (asset: AssetItem): boolean => {
+    return Boolean(asset.arkAssetId)
+  }
+
+  // sync 模式：排除同步中；unsync 模式：仅选已同步的
+  const isAssetSelectable = (asset: AssetItem): boolean => {
+    if (selectMode === 'unsync') return isAssetSynced(asset) && !isAssetSyncing(asset)
+    return !isAssetSyncing(asset)
   }
 
   const selectableAssets = useMemo(
-    () => selectMode ? assets.filter((a) => !isAssetAlreadySynced(a)) : [],
+    () => selectMode ? assets.filter((a) => isAssetSelectable(a)) : [],
     [selectMode, assets]
   )
 
@@ -243,7 +258,7 @@ export const AssetsPage = () => {
   }
 
   const exitSelectMode = () => {
-    setSelectMode(false)
+    setSelectMode(null)
     setSelectedIds(new Set())
   }
 
@@ -272,6 +287,21 @@ export const AssetsPage = () => {
     setBatchSyncOpen(true)
   }
 
+  const handleBatchUnsync = async () => {
+    setBatchUnsyncing(true)
+    try {
+      const result = await unsyncAssets([...selectedIds])
+      void messageApi.success(`已取消 ${result.count} 个素材的素材库同步，此后走 OSS 签名 URL`)
+      setBatchUnsyncOpen(false)
+      exitSelectMode()
+      await Promise.all([loadAssets({ silent: true }), loadCategories()])
+    } catch {
+      void messageApi.error('取消同步提交失败')
+    } finally {
+      setBatchUnsyncing(false)
+    }
+  }
+
   const isAdmin = state.user?.role === 'admin'
   const canUpload = state.activeProjectRole === 'manager' || state.activeProjectRole === 'member'
   const canDelete = state.activeProjectRole === 'manager'
@@ -290,10 +320,21 @@ export const AssetsPage = () => {
                 <Button
                   aria-label="批量同步"
                   icon={<SyncOutlined />}
-                  type={selectMode ? 'primary' : 'default'}
-                  onClick={() => (selectMode ? exitSelectMode() : setSelectMode(true))}
+                  type={selectMode === 'sync' ? 'primary' : 'default'}
+                  onClick={() => (selectMode === 'sync' ? exitSelectMode() : setSelectMode('sync'))}
                 >
-                  {selectMode ? '退出选择' : '批量同步'}
+                  {selectMode === 'sync' ? '退出选择' : '批量同步'}
+                </Button>
+              ) : null}
+              {canBatchSync ? (
+                <Button
+                  aria-label="取消同步"
+                  icon={<StopOutlined />}
+                  danger
+                  type={selectMode === 'unsync' ? 'primary' : 'default'}
+                  onClick={() => (selectMode === 'unsync' ? exitSelectMode() : setSelectMode('unsync'))}
+                >
+                  {selectMode === 'unsync' ? '退出选择' : '取消同步'}
                 </Button>
               ) : null}
               {isAdmin ? (
@@ -455,19 +496,31 @@ export const AssetsPage = () => {
                 disabled={selectableAssets.length === 0}
                 onChange={(e) => toggleSelectAll(e.target.checked)}
               >
-                全选可同步素材
+                {selectMode === 'unsync' ? '全选已同步素材' : '全选可同步素材'}
               </Checkbox>
               <Typography.Text type="secondary">
-                已选 {selectedIds.size} 个素材 · 不可选 {assets.length - selectableAssets.length} 个（已同步）
+                已选 {selectedIds.size} 个素材 · 不可选 {assets.length - selectableAssets.length} 个（{selectMode === 'unsync' ? '未同步或同步中' : '同步中'}）
               </Typography.Text>
-              <Button
-                type="primary"
-                icon={<SyncOutlined />}
-                disabled={selectedIds.size === 0}
-                onClick={() => void openBatchSync()}
-              >
-                同步选中素材
-              </Button>
+              {selectMode === 'unsync' ? (
+                <Button
+                  danger
+                  type="primary"
+                  icon={<StopOutlined />}
+                  disabled={selectedIds.size === 0}
+                  onClick={() => setBatchUnsyncOpen(true)}
+                >
+                  取消同步选中素材
+                </Button>
+              ) : (
+                <Button
+                  type="primary"
+                  icon={<SyncOutlined />}
+                  disabled={selectedIds.size === 0}
+                  onClick={() => void openBatchSync()}
+                >
+                  同步选中素材
+                </Button>
+              )}
             </Space>
           </section>
         ) : null}
@@ -530,9 +583,14 @@ export const AssetsPage = () => {
                 deleting={deletingId === asset.id}
                 readonly={!canDelete}
                 onDelete={handleDelete}
-                selectable={selectMode}
+                selectable={Boolean(selectMode)}
                 selected={selectedIds.has(asset.id)}
-                selectDisabled={selectMode && isAssetAlreadySynced(asset)}
+                selectDisabled={Boolean(selectMode) && !isAssetSelectable(asset)}
+                selectDisabledReason={
+                  selectMode === 'unsync'
+                    ? (isAssetSyncing(asset) ? '该素材正在同步中，请等待完成' : '该素材未同步到素材库，无需取消')
+                    : '该素材正在同步中，请等待完成'
+                }
                 onSelect={toggleSelect}
               />
             ))}
@@ -601,7 +659,41 @@ export const AssetsPage = () => {
             3. Worker 将自动提交到当前默认平台「{activeProviderName}」素材库审核
           </Typography.Text>
           <Typography.Text type="warning" style={{ fontSize: 12 }}>
+            ⚠ 已同步过的素材会被重新提交，审核通过后将获得新的素材库 ID（旧 asset:// 引用会失效，适用于素材库报"not synced to current channel"时修复）。
+          </Typography.Text>
+          <Typography.Text type="warning" style={{ fontSize: 12 }}>
             ⚠ 同步后的素材需等待平台审核通过才能用于视频生成的 asset:// 引用。审核期间仍走 OSS 签名 URL，不影响使用。
+          </Typography.Text>
+        </Space>
+      </Modal>
+
+      <Modal
+        title="取消素材库同步"
+        open={batchUnsyncOpen}
+        onCancel={() => setBatchUnsyncOpen(false)}
+        onOk={() => void handleBatchUnsync()}
+        confirmLoading={batchUnsyncing}
+        okText={`确认取消同步 ${selectedIds.size} 个素材`}
+        okButtonProps={{ danger: true, disabled: selectedIds.size === 0 }}
+      >
+        <Space direction="vertical" size={12} style={{ width: '100%' }}>
+          <Typography.Text>
+            将对选中的 <strong>{selectedIds.size}</strong> 个素材执行以下操作：
+          </Typography.Text>
+          <Typography.Text type="secondary">
+            1. 清除素材库关联（pa_id / 素材组映射），素材与 OSS 文件完整保留
+          </Typography.Text>
+          <Typography.Text type="secondary">
+            2. 素材级同步策略改为"仅保留本地"，即使所属素材组开着同步也不会自动重新同步
+          </Typography.Text>
+          <Typography.Text type="secondary">
+            3. 此后视频生成对这些素材走 OSS 签名 URL
+          </Typography.Text>
+          <Typography.Text type="warning" style={{ fontSize: 12 }}>
+            ⚠ 引用旧素材库 ID 的历史任务重放会失效，需重新选择素材创建新任务。
+          </Typography.Text>
+          <Typography.Text type="warning" style={{ fontSize: 12 }}>
+            ⚠ 远端素材库中的旧记录不会删除（平台未提供删除接口），如需释放配额请联系素材库平台。
           </Typography.Text>
         </Space>
       </Modal>

@@ -1031,6 +1031,28 @@ export class AssetService {
     return { count: valid.length }
   }
 
+  // 取消同步：解除素材库绑定（清空 pa_id/组映射），素材保留本地与 OSS。
+  // 状态保持 active（置 pending 会被 worker 捡起重推），素材级 sync_mode 置 disabled
+  // 防止所属组同步开关开启时被 reconcile 自动重新同步。
+  public async unsyncAssetsByIds(assetIds: number[]) {
+    const assets = await Promise.all(assetIds.map((id) => this.repository.findById(id)))
+    const valid = assets
+      .filter((item): item is AssetRecord => item !== null)
+      .filter((item) => Boolean(item.arkAssetId))
+
+    for (const asset of valid) {
+      await this.repository.update(asset.id, {
+        arkAssetId: null,
+        arkGroupId: null,
+        arkStatus: 'active',
+        arkError: null,
+        syncMode: 'disabled',
+      })
+    }
+
+    return { count: valid.length }
+  }
+
   private async validateProjects(userId: number, role: 'admin' | 'user', projectIds: number[]): Promise<void> {
     await Promise.all(
       projectIds.map(async (projectId) => {

@@ -162,6 +162,11 @@ export const batchSyncAssets = async (assetIds: number[]): Promise<{ count: numb
   return response.data
 }
 
+export const unsyncAssets = async (assetIds: number[]): Promise<{ count: number }> => {
+  const response = await request.post<{ count: number }>('/api/assets/batch-unsync', { assetIds })
+  return response.data
+}
+
 export const linkAssetProjects = async (id: number, projectIds: number[]): Promise<AssetItem> => {
   const response = await request.post<AssetItem>(`/api/assets/${id}/projects`, { projectIds })
   return response.data
