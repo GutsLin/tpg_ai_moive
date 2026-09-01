@@ -11,6 +11,7 @@ export const createAssetSchema = z.object({
   ossKey: z.string().trim().min(1).max(512),
   tags: z.array(z.string().trim().min(1)).default([]),
   linkProjectIds: z.array(z.coerce.number().int().positive()).default([]),
+  promptContent: z.string().max(10000).nullable().optional(),
 })
 
 export const updateAssetSchema = z

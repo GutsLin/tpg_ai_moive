@@ -35,6 +35,7 @@ export interface AssetRecord {
   projectNames: string[]
   createdAt: Date
   updatedAt: Date
+  promptContent: string | null
 }
 
 export interface AssetQueryParams {
@@ -71,6 +72,7 @@ export interface AssetRepository {
     arkAssetId?: string | null
     arkStatus?: AssetStatus
     arkError?: string | null
+    promptContent?: string | null
   }): Promise<AssetRecord>
   attachProjects(assetId: number, links: AssetProjectLinkInput[]): Promise<void>
   list(params: AssetQueryParams & { projectId: number; scope: AssetScope }): Promise<{ items: AssetRecord[]; total: number }>
@@ -134,6 +136,7 @@ type AssetRow = {
   tags: string[]
   created_at: Date | string
   updated_at: Date | string
+  prompt_content?: string | null
 }
 
 export class KyselyAssetRepository implements AssetRepository {
@@ -174,9 +177,11 @@ export class KyselyAssetRepository implements AssetRepository {
     arkAssetId?: string | null
     arkStatus?: AssetStatus
     arkError?: string | null
+    promptContent?: string | null
   }): Promise<AssetRecord> {
     const hasCreatedByUserIdColumn = await this.hasColumn('assets', 'created_by_user_id')
     const hasSourceProjectIdColumn = await this.hasColumn('assets', 'source_project_id')
+    const hasPromptContentColumn = await this.hasColumn('assets', 'prompt_content')
     const userId = input.createdByUserId ?? input.userId ?? 0
 
     const values: Record<string, unknown> = {
@@ -199,6 +204,10 @@ export class KyselyAssetRepository implements AssetRepository {
 
     if (hasSourceProjectIdColumn) {
       values.source_project_id = input.sourceProjectId ?? null
+    }
+
+    if (hasPromptContentColumn) {
+      values.prompt_content = input.promptContent ?? null
     }
 
     const row = await this.database
@@ -632,6 +641,7 @@ export class KyselyAssetRepository implements AssetRepository {
       projectNames: projectLinks.map((link) => link.projectName),
       createdAt: new Date(row.created_at),
       updatedAt: new Date(row.updated_at),
+      promptContent: row.prompt_content ?? null,
     }
   }
 
@@ -705,6 +715,7 @@ export class AssetService {
     ossKey: string
     tags: string[]
     linkProjectIds?: number[]
+    promptContent?: string | null
   }) {
     assertProjectPermission(canUploadAsset(input.projectRole), '当前项目角色不允许上传素材')
 
@@ -732,6 +743,7 @@ export class AssetService {
       arkGroupId: category?.arkGroupId ?? null,
       arkStatus: shouldSync ? 'pending' : 'active',
       arkError: null,
+      promptContent: input.promptContent ?? null,
     })
 
     await this.repository.attachProjects(asset.id, [

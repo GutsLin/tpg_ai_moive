@@ -17,6 +17,7 @@ export class AssetsController {
       ossKey: string
       tags: string[]
       linkProjectIds: number[]
+      promptContent?: string | null
     }
   ) => {
     ctx.body = ok(
