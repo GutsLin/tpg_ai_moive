@@ -192,7 +192,7 @@ export const AppLayout = ({
       icon: item.icon,
       label:
         item.path === '/infinite-atelier' ? (
-          <span role="button" tabIndex={0} onClick={() => { if (atelierLoading) return; setAtelierLoading(true); void createAtelierSsoTicket().then(({ ticket }) => { window.location.assign(`/atelier-api/api/v1/auth/sso/callback?ticket=${encodeURIComponent(ticket)}`) }).catch(() => { void messageApi.error('无限画布登录票据获取失败，请稍后重试') }).finally(() => setAtelierLoading(false)) }}>{atelierLoading ? '连接中…' : item.label}</span>
+          <span role="button" tabIndex={0} onKeyDown={(event) => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); event.currentTarget.click() } }} onClick={() => { if (atelierLoading) return; setAtelierLoading(true); void createAtelierSsoTicket().then(({ ticket }) => { window.location.assign(`/atelier-api/api/v1/auth/sso/callback?ticket=${encodeURIComponent(ticket)}`) }).catch(() => { void messageApi.error('无限画布登录票据获取失败，请稍后重试') }).finally(() => setAtelierLoading(false)) }}>{atelierLoading ? '连接中…' : item.label}</span>
         ) : <Link to={item.path}>{item.label}</Link>,
     }))
 
