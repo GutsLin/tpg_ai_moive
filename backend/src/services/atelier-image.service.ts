@@ -55,6 +55,7 @@ export class AtelierImageService {
   public async getCapability(userId: number): Promise<AtelierAiCapability> {
     try {
       const provider = await this.providerService.getUserClientConfiguration(userId, IMAGE_PROVIDER_KEY)
+      if (provider.providerType !== 'toapis') throw new ValidationAppError('当前启用的平台不支持图像生成')
       return {
         mediaType: 'image' as const,
         enabled: true,
