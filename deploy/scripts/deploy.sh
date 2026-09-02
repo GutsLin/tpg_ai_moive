@@ -132,7 +132,7 @@ rollback_to_previous_release() {
     return 1
   fi
 
-  PREVIOUS_COMPOSE_FILE="${PREVIOUS_RELEASE}/docker-compose.yml"
+  PREVIOUS_COMPOSE_FILE="${PREVIOUS_RELEASE}/deploy/docker-compose.yml"
 
   if [[ ! -f "$PREVIOUS_COMPOSE_FILE" ]]; then
     log_phase "ROLLBACK_FAILED" "reason=missing_previous_compose env=${ENV_NAME} path=${PREVIOUS_COMPOSE_FILE}"

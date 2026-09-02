@@ -2,7 +2,7 @@ name: ${NARRIX_COMPOSE_PROJECT_NAME}
 
 services:
   postgres:
-    image: postgres:17-alpine
+    image: postgres:16-alpine
     restart: unless-stopped
     environment:
       POSTGRES_DB: ${NARRIX_DB_NAME}
