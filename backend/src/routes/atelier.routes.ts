@@ -11,6 +11,7 @@ import { AtelierAiService } from '../services/atelier-ai.service'
 import { AtelierImageService } from '../services/atelier-image.service'
 import type { ProjectAccessRepository } from '../services/project-access.service'
 import { ForbiddenError } from '../utils/errors'
+import type { AtelierImageDispatcher } from '../services/atelier-image.service'
 
 const idSchema = z.object({ id: z.coerce.number().int().positive() })
 const canvasCreate = z.object({ title: z.string().trim().min(1).max(300), documentJson: z.unknown(), clientStableId: z.string().max(200).optional() })
@@ -23,12 +24,12 @@ export const assertAtelierWritable = (projectRole: string | null | undefined): v
   if (projectRole === 'viewer') throw new ForbiddenError('当前项目角色为只读')
 }
 
-export const createAtelierRouter = (assetDispatcher?: AssetDispatcher, configStore?: ConfigStore, projectAccessRepository?: ProjectAccessRepository): Router => {
+export const createAtelierRouter = (assetDispatcher?: AssetDispatcher, configStore?: ConfigStore, projectAccessRepository?: ProjectAccessRepository, imageDispatcher?: AtelierImageDispatcher): Router => {
   const router = new Router({ prefix: '/api/infinite-atelier' })
   const configService = new ConfigService({ store: configStore })
   const controller = new AtelierController(new AtelierService(undefined, async (assetIds) => {
     await Promise.all(assetIds.map((assetId) => assetDispatcher?.enqueueDelete(assetId)))
-  }), new AtelierAiService(configService), new AtelierImageService())
+  }), new AtelierAiService(configService), new AtelierImageService({ dispatcher: imageDispatcher }))
   router.use(authMiddleware(), projectContextMiddleware(projectAccessRepository))
   const requireWritable: Middleware = async (ctx, next) => {
     assertAtelierWritable(ctx.state.projectRole)

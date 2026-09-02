@@ -157,7 +157,7 @@ rollback_to_previous_release() {
     return 1
   fi
 
-  rollback_compose up -d --no-build backend frontend worker-video worker-asset-sync
+  rollback_compose up -d --no-build backend frontend worker-video worker-asset-sync worker-atelier-image
   rollback_compose ps
 
   if ! wait_for_http "frontend" "http://127.0.0.1:${FRONTEND_PORT}/health"; then
@@ -252,7 +252,7 @@ if ! run_migrations; then
   exit 1
 fi
 
-compose up -d --no-build backend frontend worker-video worker-asset-sync
+compose up -d --no-build backend frontend worker-video worker-asset-sync worker-atelier-image
 compose ps
 
 if ! wait_for_http "frontend" "http://127.0.0.1:${FRONTEND_PORT}/health"; then

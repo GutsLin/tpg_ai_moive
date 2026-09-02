@@ -18,6 +18,7 @@ compose 基础编排包含：
 - `migrate`
 - `worker-video`
 - `worker-asset-sync`
+- `worker-atelier-image`
 
 两个 worker 使用独立服务运行，便于单独重启、单独查看日志和后续扩展。
 
@@ -68,6 +69,7 @@ docker compose -f deploy/docker-compose.yml --env-file deploy/env/prod/stack.env
 docker compose -f deploy/docker-compose.yml --env-file deploy/env/prod/stack.env logs backend --tail=100
 docker compose -f deploy/docker-compose.yml --env-file deploy/env/prod/stack.env logs worker-video --tail=100
 docker compose -f deploy/docker-compose.yml --env-file deploy/env/prod/stack.env logs worker-asset-sync --tail=100
+docker compose -f deploy/docker-compose.yml --env-file deploy/env/prod/stack.env logs worker-atelier-image --tail=100
 ```
 
 ## 升级流程
@@ -76,7 +78,7 @@ docker compose -f deploy/docker-compose.yml --env-file deploy/env/prod/stack.env
 2. 备份 PostgreSQL 与 Redis 数据。
 3. 更新后端、前端源码包。
 4. 重新执行带 `--build` 的 compose 启动命令。
-5. 检查 `migrate`、`backend`、`worker-video`、`worker-asset-sync` 日志。
+5. 检查 `migrate`、`backend`、`worker-video`、`worker-asset-sync`、`worker-atelier-image` 日志。
 6. 登录前端完成核心业务冒烟测试。
 
 ## 备份建议

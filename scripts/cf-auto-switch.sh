@@ -76,7 +76,7 @@ main() {
     set -a; . /opt/narrix/env/prod/stack.env; set +a
     export NARRIX_IMAGE_TAG=20260821-prod-apikey-config
     docker compose -f deploy/docker-compose.yml --env-file /opt/narrix/env/prod/stack.env \
-      up -d backend worker-video worker-asset-sync >/dev/null 2>&1 \
+      up -d backend worker-video worker-asset-sync worker-atelier-image >/dev/null 2>&1 \
       && log "INFO 容器已用新 IP 重建" \
       || log "ERROR 容器重建失败，请人工检查"
   else

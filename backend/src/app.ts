@@ -42,6 +42,7 @@ import { VideoProviderService } from './services/video-provider.service'
 import { appLogger } from './utils/logger'
 import { BullMqAssetDispatcher } from './workers/asset-sync.worker'
 import { BullMqVideoDispatcher } from './workers/video.worker'
+import { BullMqAtelierImageDispatcher } from './workers/atelier-image.worker'
 
 export interface AppDependencies {
   userRepository?: UserRepository
@@ -60,6 +61,7 @@ export interface AppDependencies {
   videoGenerationLogRepository?: VideoGenerationLogRepository
   ossService?: OssServiceContract
   setupService?: SetupServiceContract
+  atelierImageDispatcher?: import('./services/atelier-image.service').AtelierImageDispatcher
 }
 
 export const createApp = (dependencies: AppDependencies = {}): Koa => {
@@ -78,6 +80,7 @@ export const createApp = (dependencies: AppDependencies = {}): Koa => {
     dependencies.setupService ?? (process.env.NODE_ENV === 'test' ? undefined : new SetupService())
   const assetDispatcher = dependencies.assetDispatcher ?? new BullMqAssetDispatcher()
   const videoDispatcher = dependencies.videoDispatcher ?? new BullMqVideoDispatcher()
+  const atelierImageDispatcher = dependencies.atelierImageDispatcher ?? new BullMqAtelierImageDispatcher()
   const videoGenerationLogRepository =
     dependencies.videoGenerationLogRepository ??
     (process.env.NODE_ENV === 'test'
@@ -113,7 +116,7 @@ export const createApp = (dependencies: AppDependencies = {}): Koa => {
   )
   const configRouter = createConfigRouter(configService, ossService)
   const projectsRouter = createProjectsRouter(dependencies.projectRepository, dependencies.projectMemberRepository)
-  const atelierRouter = createAtelierRouter(assetDispatcher, dependencies.configStore, dependencies.projectAccessRepository)
+  const atelierRouter = createAtelierRouter(assetDispatcher, dependencies.configStore, dependencies.projectAccessRepository, atelierImageDispatcher)
   const setupRouter = setupService ? createSetupRouter(setupService) : null
   const usersRouter = createUsersRouter(userService)
   const userApiKeysRouter = createUserApiKeysRouter(

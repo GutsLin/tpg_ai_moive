@@ -27,6 +27,12 @@ export interface ImageGenerationServiceOptions {
   userApiKeyService?: UserApiKeyService
   providerService?: VideoProviderService
   adapter?: AtelierImageAdapter
+  dispatcher?: AtelierImageDispatcher
+}
+
+export interface AtelierImageDispatcher {
+  enqueueCreate(taskId: number): Promise<void>
+  enqueuePoll(taskId: number, options?: { delayMs?: number; runAt?: Date }): Promise<void>
 }
 
 const DEFAULT_MODEL = 'gpt-image-2'
@@ -44,12 +50,16 @@ export class AtelierImageService {
   private readonly userApiKeyService: UserApiKeyService
   private readonly providerService: VideoProviderService
   private readonly adapter: AtelierImageAdapter
+  private readonly dispatcher?: AtelierImageDispatcher
+  private readonly allowInlineExecution: boolean
 
   public constructor(options: ImageGenerationServiceOptions = {}) {
     this.database = options.database ?? db
     this.userApiKeyService = options.userApiKeyService ?? new UserApiKeyService()
     this.providerService = options.providerService ?? new VideoProviderService()
     this.adapter = options.adapter ?? new OpenAiCompatibleImageAdapter()
+    this.dispatcher = options.dispatcher
+    this.allowInlineExecution = Boolean(options.adapter && !options.dispatcher)
   }
 
   public async getCapability(userId: number): Promise<AtelierAiCapability> {
@@ -101,39 +111,84 @@ export class AtelierImageService {
       provider_task_id: null, error_code: null, error_message: null, created_at: new Date(), updated_at: new Date(),
     }).returningAll().executeTakeFirstOrThrow()
 
-    try {
-      const result = await this.adapter.create({ endpoint: provider.endpoint, apiKey: provider.apiKey, model, prompt, size: input.size ?? '1:1', n: input.n ?? 1, references: input.references })
-      if (result.mode === 'async') {
-        const updated = await this.database.updateTable('atelier_generation_tasks').set({ status: 'processing', provider_task_id: result.providerTaskId, updated_at: new Date() }).where('id', '=', task.id).returningAll().executeTakeFirstOrThrow()
-        return { ...this.toTaskResponse(updated), nextPollAfterMs: result.nextPollAfterMs ?? 1000 }
+    if (!this.dispatcher && this.allowInlineExecution) {
+      try {
+        const result = await this.adapter.create({ endpoint: provider.endpoint, apiKey: provider.apiKey, model, prompt, size: input.size ?? '1:1', n: input.n ?? 1, references: input.references })
+        if (result.mode === 'async') {
+          const updated = await this.database.updateTable('atelier_generation_tasks').set({ status: 'processing', provider_task_id: result.providerTaskId, updated_at: new Date() }).where('id', '=', task.id).returningAll().executeTakeFirstOrThrow()
+          return { ...this.toTaskResponse(updated), nextPollAfterMs: result.nextPollAfterMs ?? 1000 }
+        }
+        const outputs = await Promise.all(result.outputs.map(outputToResponse))
+        const updated = await this.database.updateTable('atelier_generation_tasks').set({ status: 'succeeded', progress_percent: 100, updated_at: new Date() }).where('id', '=', task.id).returningAll().executeTakeFirstOrThrow()
+        return { ...this.toTaskResponse(updated), outputs }
+      } catch (error) {
+        const rawMessage = error instanceof Error ? error.message : '图像生成失败'
+        const safeMessage = rawMessage.replaceAll(provider.apiKey, '[REDACTED]').slice(0, 500)
+        await this.database.updateTable('atelier_generation_tasks').set({ status: 'failed', error_code: 'IMAGE_PROVIDER_ERROR', error_message: safeMessage, updated_at: new Date() }).where('id', '=', task.id).execute()
+        throw new AppError(502, 502, '图像生成服务调用失败')
       }
-      const outputs = await Promise.all(result.outputs.map(outputToResponse))
-      const updated = await this.database.updateTable('atelier_generation_tasks').set({ status: 'succeeded', progress_percent: 100, updated_at: new Date() }).where('id', '=', task.id).returningAll().executeTakeFirstOrThrow()
-      return { ...this.toTaskResponse(updated), outputs }
-    } catch (error) {
-      const rawMessage = error instanceof Error ? error.message : '图像生成失败'
-      const safeMessage = rawMessage.replaceAll(provider.apiKey, '[REDACTED]').slice(0, 500)
-      await this.database.updateTable('atelier_generation_tasks').set({ status: 'failed', error_code: 'IMAGE_PROVIDER_ERROR', error_message: safeMessage, updated_at: new Date() }).where('id', '=', task.id).execute()
-      throw new AppError(502, 502, '图像生成服务调用失败')
     }
+    if (!this.dispatcher) throw new AppError(503, 503, '图片生成队列未配置')
+    try {
+      await this.dispatcher.enqueueCreate(Number(task.id))
+    } catch {
+      await this.database.updateTable('atelier_generation_tasks').set({ status: 'failed', error_code: 'IMAGE_QUEUE_ERROR', error_message: '图片生成任务入队失败', updated_at: new Date() }).where('id', '=', task.id).execute()
+      throw new AppError(503, 503, '图片生成队列暂不可用')
+    }
+    return this.toTaskResponse(task)
   }
 
   public async poll(projectId: number, userId: number, taskId: number) {
     const task = await this.database.selectFrom('atelier_generation_tasks').selectAll().where('id', '=', taskId)
       .where('project_id', '=', projectId).where('created_by_user_id', '=', userId).where('operation', '=', 'image.generate').executeTakeFirst()
     if (!task) throw new NotFoundError('图像任务不存在')
-    if (task.status !== 'processing' || !task.provider_task_id) return this.toTaskResponse(task)
-    const provider = await this.providerService.getUserClientConfiguration(userId, task.channel_key ?? undefined)
-    let result
-    try {
-      result = await this.adapter.poll({ endpoint: provider.endpoint, apiKey: provider.apiKey, providerTaskId: task.provider_task_id })
-    } catch {
-      result = { status: 'failed' as const, errorCode: 'IMAGE_PROVIDER_ERROR', errorMessage: '图像生成服务调用失败' }
+    return this.toTaskResponse(task)
+  }
+
+  /** Called only by the image worker. The HTTP layer never invokes provider APIs. */
+  public async processCreate(taskId: number): Promise<void> {
+    const task = await this.database.selectFrom('atelier_generation_tasks').selectAll().where('id', '=', taskId).executeTakeFirst()
+    if (!task || task.status !== 'pending') return
+    const request = (task.request_json ?? {}) as { prompt?: string; size?: string; n?: number; references?: Array<{ url?: string }> }
+    const provider = await this.providerService.getUserClientConfiguration(Number(task.created_by_user_id), task.channel_key ?? 'toapis')
+    if (provider.providerType !== 'toapis') throw new ValidationAppError('当前启用的平台不支持图像生成')
+    const result = await this.adapter.create({ endpoint: provider.endpoint, apiKey: provider.apiKey, model: task.model, prompt: request.prompt ?? '', size: request.size, n: request.n, references: request.references })
+    if (result.mode === 'async') {
+      const nextPollAt = new Date(Date.now() + (result.nextPollAfterMs ?? 1000))
+      await this.database.updateTable('atelier_generation_tasks').set({ status: 'processing', provider_task_id: result.providerTaskId, next_poll_at: nextPollAt, updated_at: new Date() }).where('id', '=', taskId).where('status', '=', 'pending').execute()
+      await this.dispatcher?.enqueuePoll(taskId, { runAt: nextPollAt })
+      return
     }
-    const safeErrorMessage = result.errorMessage?.replaceAll(provider.apiKey, '[REDACTED]').slice(0, 500) ?? null
-    const patch: Record<string, unknown> = { status: result.status, progress_percent: result.progress ?? task.progress_percent, error_code: result.errorCode ?? null, error_message: safeErrorMessage, updated_at: new Date() }
-    const updated = await this.database.updateTable('atelier_generation_tasks').set(patch).where('id', '=', task.id).returningAll().executeTakeFirstOrThrow()
-    return { ...this.toTaskResponse(updated), ...(result.outputs ? { outputs: await Promise.all(result.outputs.map(outputToResponse)) } : {}) }
+    await this.completeTask(taskId, result.outputs)
+  }
+
+  public async processPoll(taskId: number): Promise<void> {
+    const task = await this.database.selectFrom('atelier_generation_tasks').selectAll().where('id', '=', taskId).executeTakeFirst()
+    if (!task || task.status !== 'processing' || !task.provider_task_id) return
+    const now = new Date()
+    if (task.next_poll_at && new Date(task.next_poll_at).getTime() > now.getTime()) {
+      await this.dispatcher?.enqueuePoll(taskId, { runAt: new Date(task.next_poll_at) })
+      return
+    }
+    const provider = await this.providerService.getUserClientConfiguration(Number(task.created_by_user_id), task.channel_key ?? 'toapis')
+    const result = await this.adapter.poll({ endpoint: provider.endpoint, apiKey: provider.apiKey, providerTaskId: task.provider_task_id })
+    if (result.status === 'processing') {
+      const nextPollAt = new Date(Date.now() + 2000)
+      await this.database.updateTable('atelier_generation_tasks').set({ progress_percent: result.progress ?? task.progress_percent, last_polled_at: now, next_poll_at: nextPollAt, updated_at: new Date() }).where('id', '=', taskId).execute()
+      await this.dispatcher?.enqueuePoll(taskId, { runAt: nextPollAt })
+      return
+    }
+    if (result.status === 'succeeded' && result.outputs) {
+      await this.completeTask(taskId, result.outputs)
+      return
+    }
+    const safeErrorMessage = result.errorMessage?.replaceAll(provider.apiKey, '[REDACTED]').slice(0, 500) ?? '图像生成失败'
+    await this.database.updateTable('atelier_generation_tasks').set({ status: 'failed', progress_percent: result.progress ?? task.progress_percent, error_code: result.errorCode ?? 'IMAGE_PROVIDER_ERROR', error_message: safeErrorMessage, last_polled_at: now, next_poll_at: null, updated_at: new Date() }).where('id', '=', taskId).execute()
+  }
+
+  private async completeTask(taskId: number, outputs: ImageOutput[]): Promise<void> {
+    const serialized = await Promise.all(outputs.map(outputToResponse))
+    await this.database.updateTable('atelier_generation_tasks').set({ status: 'succeeded', progress_percent: 100, result_json: serialized as unknown as any, next_poll_at: null, updated_at: new Date() }).where('id', '=', taskId).execute()
   }
 
   private assertWritable(role: ProjectRole) {
@@ -141,6 +196,6 @@ export class AtelierImageService {
   }
 
   private toTaskResponse(task: any) {
-    return { id: Number(task.id), projectId: Number(task.project_id), createdByUserId: Number(task.created_by_user_id), model: task.model, operation: task.operation, status: task.status, progress: task.progress_percent, errorCode: task.error_code, errorMessage: task.error_message, createdAt: task.created_at, updatedAt: task.updated_at }
+    return { id: Number(task.id), projectId: Number(task.project_id), createdByUserId: Number(task.created_by_user_id), model: task.model, operation: task.operation, status: task.status, progress: task.progress_percent, errorCode: task.error_code, errorMessage: task.error_message, createdAt: task.created_at, updatedAt: task.updated_at, ...(task.result_json ? { outputs: task.result_json } : {}) }
   }
 }

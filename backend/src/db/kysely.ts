@@ -149,6 +149,9 @@ export interface AtelierGenerationTaskTable {
   provider_task_id: string | null
   error_code: string | null
   error_message: string | null
+  result_json: NullableJsonValueColumn
+  next_poll_at: TimestampColumn | null
+  last_polled_at: TimestampColumn | null
   created_at: TimestampColumn
   updated_at: TimestampColumn
 }

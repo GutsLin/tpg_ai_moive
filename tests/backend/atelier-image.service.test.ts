@@ -12,7 +12,7 @@ describe('Atelier image generation service', () => {
     const memoryDb = newDb()
     const { Pool } = memoryDb.adapters.createPg()
     database = new Kysely<Database>({ dialect: new PostgresDialect({ pool: new Pool() }) })
-    await database.schema.createTable('atelier_generation_tasks').addColumn('id', 'bigserial', (c) => c.primaryKey()).addColumn('project_id', 'bigint').addColumn('created_by_user_id', 'bigint').addColumn('canvas_id', 'bigint').addColumn('canvas_version', 'integer').addColumn('prompt_id', 'bigint').addColumn('prompt_version', 'integer').addColumn('operation', 'varchar(100)').addColumn('media_type', 'varchar(16)').addColumn('channel_key', 'varchar(128)').addColumn('model', 'varchar(255)').addColumn('idempotency_key', 'varchar(255)').addColumn('request_json', 'jsonb').addColumn('status', 'varchar(32)').addColumn('progress_percent', 'integer').addColumn('provider_task_id', 'varchar(255)').addColumn('error_code', 'varchar(128)').addColumn('error_message', 'text').addColumn('created_at', 'timestamptz').addColumn('updated_at', 'timestamptz').execute()
+    await database.schema.createTable('atelier_generation_tasks').addColumn('id', 'bigserial', (c) => c.primaryKey()).addColumn('project_id', 'bigint').addColumn('created_by_user_id', 'bigint').addColumn('canvas_id', 'bigint').addColumn('canvas_version', 'integer').addColumn('prompt_id', 'bigint').addColumn('prompt_version', 'integer').addColumn('operation', 'varchar(100)').addColumn('media_type', 'varchar(16)').addColumn('channel_key', 'varchar(128)').addColumn('model', 'varchar(255)').addColumn('idempotency_key', 'varchar(255)').addColumn('request_json', 'jsonb').addColumn('status', 'varchar(32)').addColumn('progress_percent', 'integer').addColumn('provider_task_id', 'varchar(255)').addColumn('error_code', 'varchar(128)').addColumn('error_message', 'text').addColumn('result_json', 'jsonb').addColumn('next_poll_at', 'timestamptz').addColumn('last_polled_at', 'timestamptz').addColumn('created_at', 'timestamptz').addColumn('updated_at', 'timestamptz').execute()
   })
 
   afterEach(async () => database.destroy())
@@ -46,5 +46,20 @@ describe('Atelier image generation service', () => {
     await expect(service.create({ projectId: 7, userId: 11, projectRole: 'viewer', prompt: 'x' })).rejects.toMatchObject({ status: 403 })
     await expect(service.create({ projectId: 7, userId: 11, projectRole: 'member', prompt: 'x' })).rejects.toThrow('no personal key')
     expect(adapter.create).not.toHaveBeenCalled()
+  })
+
+  it('only enqueues from HTTP path and lets the worker persist provider results', async () => {
+    const adapter = { create: vi.fn().mockResolvedValue({ mode: 'sync', outputs: [{ source: 'url', url: 'https://cdn.test/a.png' }] }), poll: vi.fn() }
+    const dispatcher = { enqueueCreate: vi.fn().mockResolvedValue(undefined), enqueuePoll: vi.fn().mockResolvedValue(undefined) }
+    const providerService = { getUserClientConfiguration: vi.fn().mockResolvedValue({ providerKey: 'toapis', providerType: 'toapis', name: 'ToAPIs', endpoint: 'https://provider.test', apiKey: 'user-only-secret' }) }
+    const service = new AtelierImageService({ database, adapter, dispatcher, providerService: providerService as any })
+    const task = await service.create({ projectId: 7, userId: 11, projectRole: 'member', prompt: 'x' })
+    expect(task.status).toBe('pending')
+    expect(dispatcher.enqueueCreate).toHaveBeenCalledWith(task.id)
+    expect(adapter.create).not.toHaveBeenCalled()
+    await service.processCreate(task.id)
+    const stored = await database.selectFrom('atelier_generation_tasks').selectAll().where('id', '=', task.id).executeTakeFirstOrThrow()
+    expect(stored.status).toBe('succeeded')
+    expect(stored.result_json).toBeTruthy()
   })
 })

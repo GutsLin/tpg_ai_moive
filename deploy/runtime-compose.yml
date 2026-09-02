@@ -170,6 +170,38 @@ services:
     networks:
       - narrix
 
+  worker-atelier-image:
+    image: narrix-backend:${NARRIX_IMAGE_TAG:-local}
+    pull_policy: never
+    command: ["node", "dist/workers/atelier-image.worker.js"]
+    restart: unless-stopped
+    environment:
+      NODE_ENV: production
+      PORT: 3000
+      DB_HOST: postgres
+      DB_PORT: 5432
+      DB_USER: ${NARRIX_DB_USER}
+      DB_PASSWORD: ${NARRIX_DB_PASSWORD}
+      DB_NAME: ${NARRIX_DB_NAME}
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      REDIS_PASSWORD: ${NARRIX_REDIS_PASSWORD:-}
+      JWT_SECRET: ${NARRIX_JWT_SECRET}
+      JWT_EXPIRES_IN: ${NARRIX_JWT_EXPIRES_IN:-7d}
+      CONFIG_ENCRYPTION_KEY: ${NARRIX_CONFIG_ENCRYPTION_KEY}
+    labels:
+      service: worker-atelier-image
+      environment: ${NARRIX_PROFILE}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    networks:
+      - narrix
+
 volumes:
   narrix-db:
     name: ${NARRIX_DB_VOLUME}
