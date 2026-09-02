@@ -217,10 +217,21 @@ describe('AppLayout', () => {
     expect(screen.getByText('用户管理')).toBeInTheDocument()
   })
 
-  it('暂时隐藏无限画布侧栏入口', () => {
+  it('系统管理员可以看到无限画布侧栏入口', async () => {
     renderLayout()
 
-    expect(screen.queryByRole('link', { name: '无限画布' })).not.toBeInTheDocument()
+    expect(await screen.findByRole('button', { name: '无限画布' })).toBeInTheDocument()
+  })
+
+  it('普通用户看不到无限画布侧栏入口', async () => {
+    localStorage.setItem(
+      'auth-user',
+      JSON.stringify({ id: 2, username: 'operator', role: 'user', menuPerms: ['assets'], status: 1 })
+    )
+    renderLayout()
+
+    await screen.findByText('素材管理')
+    expect(screen.queryByRole('button', { name: '无限画布' })).not.toBeInTheDocument()
   })
 
   it('具备 analytics 权限时侧栏显示数据统计入口', () => {
