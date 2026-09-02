@@ -37,6 +37,10 @@ const menuConfig = [
   { key: 'config', label: '系统配置', path: '/config', icon: <SettingOutlined /> },
 ]
 
+// Temporarily keep the feature available by direct route while hiding its
+// navigation entry until the rollout is resumed.
+const INFINITE_ATELIER_NAV_ENABLED = false
+
 const projectRoleTextMap = {
   manager: '项目管理员',
   member: '项目成员',
@@ -168,6 +172,7 @@ export const AppLayout = ({
   const platformRoleText = state.user?.role === 'admin' ? '管理员' : '普通用户'
 
   const menuItems = menuConfig
+    .filter((item) => item.path !== '/infinite-atelier' || INFINITE_ATELIER_NAV_ENABLED)
     .filter((item) => {
       const requiredPerm = routePermMap[item.path as keyof typeof routePermMap]
       const hasPerm = requiredPerm === null || Boolean(state.user?.menuPerms.includes(requiredPerm))

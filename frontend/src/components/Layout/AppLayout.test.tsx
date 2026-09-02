@@ -217,22 +217,10 @@ describe('AppLayout', () => {
     expect(screen.getByText('用户管理')).toBeInTheDocument()
   })
 
-  it('没有业务菜单权限时，所有已登录用户仍显示无限画布入口', () => {
-    localStorage.setItem(
-      'auth-user',
-      JSON.stringify({
-        id: 2,
-        username: 'member',
-        role: 'user',
-        menuPerms: [],
-        status: 1,
-      })
-    )
-
+  it('暂时隐藏无限画布侧栏入口', () => {
     renderLayout()
 
-    const atelierLink = screen.getByRole('link', { name: '无限画布' })
-    expect(atelierLink).toHaveAttribute('href', '/infinite-atelier')
+    expect(screen.queryByRole('link', { name: '无限画布' })).not.toBeInTheDocument()
   })
 
   it('具备 analytics 权限时侧栏显示数据统计入口', () => {
