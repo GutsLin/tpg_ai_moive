@@ -18,7 +18,7 @@ import { Avatar, Button, Dropdown, Form, Input, Layout, Menu, Modal, Typography,
 import { useEffect, useState } from 'react'
 import { Link, useLocation, useNavigate } from 'react-router-dom'
 
-import { changePassword, logout as logoutApi } from '../../api/auth'
+import { changePassword, createAtelierSsoTicket, logout as logoutApi } from '../../api/auth'
 import { isAdminOnlyRoute, routePermMap } from '../../router/permissions'
 import { useAuth } from '../../stores/auth'
 import { useBrand } from '../../stores/brand'
@@ -39,7 +39,7 @@ const menuConfig = [
 
 // Temporarily keep the feature available by direct route while hiding its
 // navigation entry until the rollout is resumed.
-const INFINITE_ATELIER_NAV_ENABLED = false
+const INFINITE_ATELIER_NAV_ENABLED = true
 
 const projectRoleTextMap = {
   manager: '项目管理员',
@@ -167,6 +167,7 @@ export const AppLayout = ({
   const [compactNavigation, setCompactNavigation] = useState(getInitialCompactNavigationState)
   const systemName = resolveSystemName(brandingName ?? brand.systemName)
   const navigationCollapsed = compactNavigation || siderCollapsed
+  const [atelierLoading, setAtelierLoading] = useState(false)
 
   const activeProject = state.projects.find((project) => project.id === state.activeProjectId) ?? null
   const platformRoleText = state.user?.role === 'admin' ? '管理员' : '普通用户'
@@ -189,7 +190,10 @@ export const AppLayout = ({
     .map((item) => ({
       key: item.path,
       icon: item.icon,
-      label: <Link to={item.path}>{item.label}</Link>,
+      label:
+        item.path === '/infinite-atelier' ? (
+          <span role="button" tabIndex={0} onClick={() => { if (atelierLoading) return; setAtelierLoading(true); void createAtelierSsoTicket().then(({ ticket }) => { window.location.assign(`/atelier-api/api/v1/auth/sso/callback?ticket=${encodeURIComponent(ticket)}`) }).catch(() => { void messageApi.error('无限画布登录票据获取失败，请稍后重试') }).finally(() => setAtelierLoading(false)) }}>{atelierLoading ? '连接中…' : item.label}</span>
+        ) : <Link to={item.path}>{item.label}</Link>,
     }))
 
   useEffect(() => {

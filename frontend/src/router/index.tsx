@@ -17,7 +17,7 @@ import { SetupPage } from '../pages/Setup'
 import { SetupHelpPage } from '../pages/SetupHelp'
 import { UsersPage } from '../pages/Users'
 import { VideosPage } from '../pages/Videos'
-import { InfiniteAtelierPage } from '../pages/InfiniteAtelier'
+import { createAtelierSsoTicket } from '../api/auth'
 import { useBrand } from '../stores/brand'
 import { resolveSystemName } from '../utils/branding'
 import { getDefaultRouteForUser, isAdminOnlyRoute, isProjectScopedRoute, noAccessRoute, routePermMap } from './permissions'
@@ -82,6 +82,15 @@ const FullscreenSpinner = () => (
     <Spin size="large" />
   </div>
 )
+
+const ExternalAtelierRedirect = () => {
+  useEffect(() => {
+    void createAtelierSsoTicket().then(({ ticket }) => {
+      window.location.assign(`/atelier-api/api/v1/auth/sso/callback?ticket=${encodeURIComponent(ticket)}`)
+    })
+  }, [])
+  return <FullscreenSpinner />
+}
 
 const FullscreenSetupError = ({
   brandingName,
@@ -250,7 +259,7 @@ const AppRoutes = () => {
         path="/infinite-atelier/*"
         element={ensureInitialized(
           <ProtectedRoute path="/infinite-atelier" brandingName={brandingName}>
-            <InfiniteAtelierPage />
+            <ExternalAtelierRedirect />
           </ProtectedRoute>
         )}
       />

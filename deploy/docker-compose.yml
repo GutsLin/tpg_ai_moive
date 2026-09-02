@@ -83,6 +83,9 @@ services:
       JWT_SECRET: ${NARRIX_JWT_SECRET}
       JWT_EXPIRES_IN: ${NARRIX_JWT_EXPIRES_IN:-7d}
       CONFIG_ENCRYPTION_KEY: ${NARRIX_CONFIG_ENCRYPTION_KEY}
+      ATELIER_SSO_SERVICE_SECRET: ${ATELIER_SSO_SERVICE_SECRET}
+      ATELIER_SSO_ISSUER: ${ATELIER_SSO_ISSUER:-narrix-main}
+      ATELIER_SSO_AUDIENCE: ${ATELIER_SSO_AUDIENCE:-narrix-atelier}
     depends_on:
       postgres:
         condition: service_healthy
@@ -92,6 +95,61 @@ services:
         condition: service_completed_successfully
     networks:
       - narrix
+
+  atelier-postgres:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${ATELIER_DB_NAME:-atelier}
+      POSTGRES_USER: ${ATELIER_DB_USER:-atelier}
+      POSTGRES_PASSWORD: ${ATELIER_DB_PASSWORD:-atelier-dev-password}
+    volumes: [atelier-db:/var/lib/postgresql/data]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+    networks: [narrix]
+
+  atelier-redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    volumes: [atelier-redis:/data]
+    networks: [narrix]
+
+  atelier-backend:
+    image: narrix-atelier-backend:${NARRIX_IMAGE_TAG:-local}
+    build:
+      context: ../../Narrix-Infinite-Atelier
+      dockerfile: server/Dockerfile
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: postgresql://${ATELIER_DB_USER:-atelier}:${ATELIER_DB_PASSWORD:-atelier-dev-password}@atelier-postgres:5432/${ATELIER_DB_NAME:-atelier}?schema=public
+      REDIS_URL: redis://atelier-redis:6379
+      PORT: 4000
+      JWT_SECRET: ${ATELIER_JWT_SECRET:-change-me-atelier-jwt-secret}
+      AES_MASTER_KEY: ${ATELIER_AES_MASTER_KEY}
+      METRICS_TOKEN: ${ATELIER_METRICS_TOKEN}
+      MAIN_PROJECT_SSO_EXCHANGE_URL: http://backend:3000/api/auth/internal/atelier/sso/exchange
+      ATELIER_SSO_SERVICE_SECRET: ${ATELIER_SSO_SERVICE_SECRET}
+      COOKIE_SECURE: ${ATELIER_COOKIE_SECURE:-false}
+      FRONTEND_ORIGIN: ${ATELIER_FRONTEND_ORIGIN:-http://localhost}
+    depends_on:
+      atelier-postgres: { condition: service_healthy }
+      atelier-redis: { condition: service_started }
+      backend: { condition: service_started }
+    networks: [narrix]
+
+  atelier-web:
+    build:
+      context: ../../Narrix-Infinite-Atelier
+      dockerfile: web/Dockerfile
+      args:
+        VITE_BASE: /atelier/
+        VITE_API_BASE_URL: /atelier-api/api/v1
+        VITE_MAIN_APP_URL: /
+    restart: unless-stopped
+    volumes:
+      - ../../Narrix-Infinite-Atelier/deploy/nginx.internal.conf:/etc/nginx/conf.d/default.conf:ro
+    depends_on: [atelier-backend]
+    networks: [narrix]
 
   frontend:
     image: narrix-frontend:${NARRIX_IMAGE_TAG:-local}
@@ -106,6 +164,8 @@ services:
       - ${NARRIX_FRONTEND_PORT}:80
     depends_on:
       backend:
+        condition: service_started
+      atelier-web:
         condition: service_started
     networks:
       - narrix
@@ -195,6 +255,9 @@ services:
       JWT_SECRET: ${NARRIX_JWT_SECRET}
       JWT_EXPIRES_IN: ${NARRIX_JWT_EXPIRES_IN:-7d}
       CONFIG_ENCRYPTION_KEY: ${NARRIX_CONFIG_ENCRYPTION_KEY}
+      ATELIER_SSO_SERVICE_SECRET: ${ATELIER_SSO_SERVICE_SECRET}
+      ATELIER_SSO_ISSUER: ${ATELIER_SSO_ISSUER:-narrix-main}
+      ATELIER_SSO_AUDIENCE: ${ATELIER_SSO_AUDIENCE:-narrix-atelier}
     labels:
       service: worker-atelier-image
       environment: ${NARRIX_PROFILE}
@@ -213,6 +276,10 @@ volumes:
     name: ${NARRIX_DB_VOLUME}
   narrix-redis:
     name: ${NARRIX_REDIS_VOLUME}
+  atelier-db:
+    name: ${ATELIER_DB_VOLUME:-atelier_db}
+  atelier-redis:
+    name: ${ATELIER_REDIS_VOLUME:-atelier_redis}
 
 networks:
   narrix:

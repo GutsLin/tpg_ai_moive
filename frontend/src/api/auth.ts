@@ -51,3 +51,8 @@ export const changePassword = async (payload: {
 }): Promise<void> => {
   await request.patch('/api/auth/password', payload)
 }
+
+export const createAtelierSsoTicket = async (): Promise<{ ticket: string; expiresAt: string }> => {
+  const response = await request.post<{ ticket: string; expiresAt: string }>('/api/auth/atelier/sso-ticket')
+  return response.data
+}

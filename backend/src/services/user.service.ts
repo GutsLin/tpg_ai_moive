@@ -402,6 +402,11 @@ export class UserService {
       : (options.userProjectRepository ?? new KyselyUserProjectRepository())
   }
 
+  public getRepository(): UserRepository {
+    return this.repository
+  }
+
+
   public async login(username: string, password: string): Promise<LoginResult> {
     const user = await this.repository.findByUsername(username)
     if (!user || user.status !== 1) {

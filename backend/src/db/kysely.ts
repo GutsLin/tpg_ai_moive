@@ -282,6 +282,22 @@ export interface UserApiKeysTable {
   updated_at: TimestampColumn
 }
 
+export interface AtelierSsoTicketsTable {
+  jti: string
+  ticket_hash: string
+  issuer: string
+  audience: string
+  external_user_id: number
+  username: string
+  display_name: string
+  user_status: number
+  role: 'admin' | 'user'
+  issued_at: TimestampColumn
+  expires_at: TimestampColumn
+  consumed_at: TimestampColumn | null
+  created_at: TimestampColumn
+}
+
 export interface Database {
   users: UsersTable
   system_config: SystemConfigTable
@@ -295,6 +311,7 @@ export interface Database {
   video_task_assets: VideoTaskAssetsTable
   video_generation_logs: VideoGenerationLogsTable
   user_api_keys: UserApiKeysTable
+  atelier_sso_tickets: AtelierSsoTicketsTable
   atelier_canvases: AtelierCanvasTable
   atelier_prompts: AtelierPromptTable
   atelier_prompt_versions: AtelierPromptVersionTable

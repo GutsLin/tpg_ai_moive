@@ -43,6 +43,7 @@ import { appLogger } from './utils/logger'
 import { BullMqAssetDispatcher } from './workers/asset-sync.worker'
 import { BullMqVideoDispatcher } from './workers/video.worker'
 import { BullMqAtelierImageDispatcher } from './workers/atelier-image.worker'
+import { AtelierSsoService } from './services/atelier-sso.service'
 
 export interface AppDependencies {
   userRepository?: UserRepository
@@ -87,7 +88,8 @@ export const createApp = (dependencies: AppDependencies = {}): Koa => {
       ? new NoopVideoGenerationLogRepository()
       : new KyselyVideoGenerationLogRepository())
   const videoGenerationLogger = new VideoGenerationLogger(videoGenerationLogRepository)
-  const authRouter = createAuthRouter(userService)
+  const atelierSso = new AtelierSsoService(userService.getRepository())
+  const authRouter = createAuthRouter(userService, atelierSso)
   const assetCategoriesRouter = createAssetCategoriesRouter(
     dependencies.assetCategoryRepository,
     assetDispatcher,
