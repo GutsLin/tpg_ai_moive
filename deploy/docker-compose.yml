@@ -135,6 +135,16 @@ services:
       atelier-postgres: { condition: service_healthy }
       atelier-redis: { condition: service_started }
       backend: { condition: service_started }
+      atelier-migrate: { condition: service_completed_successfully }
+    networks: [narrix]
+
+  atelier-migrate:
+    image: narrix-atelier-backend:${NARRIX_IMAGE_TAG:-local}
+    command: ["npx", "prisma", "migrate", "deploy", "--schema", "server/prisma/schema.prisma"]
+    environment:
+      DATABASE_URL: postgresql://${ATELIER_DB_USER:-atelier}:${ATELIER_DB_PASSWORD:-atelier-dev-password}@atelier-postgres:5432/${ATELIER_DB_NAME:-atelier}?schema=public
+    depends_on:
+      atelier-postgres: { condition: service_healthy }
     networks: [narrix]
 
   atelier-web:
