@@ -169,7 +169,8 @@ export const AppLayout = ({
 
   const menuItems = menuConfig
     .filter((item) => {
-      const hasPerm = Boolean(state.user?.menuPerms.includes(routePermMap[item.path as keyof typeof routePermMap]))
+      const requiredPerm = routePermMap[item.path as keyof typeof routePermMap]
+      const hasPerm = requiredPerm === null || Boolean(state.user?.menuPerms.includes(requiredPerm))
       if (!hasPerm) {
         return false
       }

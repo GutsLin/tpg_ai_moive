@@ -10,7 +10,9 @@ export const routePermMap = {
   '/users': 'users',
   '/logs': 'logs',
   '/config': 'config',
-  '/infinite-atelier': 'assets',
+  // Infinite Atelier is available to every authenticated user. Project access
+  // and canvas ownership are enforced by the project context and API layers.
+  '/infinite-atelier': null,
 } as const
 
 const routeOrder = ['/assets', '/infinite-atelier', '/videos', '/analytics', '/projects', '/users', '/logs', '/config'] as const
@@ -26,7 +28,8 @@ export const getDefaultRouteForUser = (user: AuthUser | null | undefined) => {
   }
 
   const allowedRoute = routeOrder.find((route) => {
-    const hasPerm = user.menuPerms.includes(routePermMap[route])
+    const requiredPerm = routePermMap[route]
+    const hasPerm = requiredPerm === null || user.menuPerms.includes(requiredPerm)
     if (!hasPerm) {
       return false
     }

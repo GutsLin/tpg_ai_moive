@@ -217,14 +217,14 @@ describe('AppLayout', () => {
     expect(screen.getByText('用户管理')).toBeInTheDocument()
   })
 
-  it('具备 assets 权限但没有独立无限画布权限时，侧栏仍显示无限画布入口', () => {
+  it('没有业务菜单权限时，所有已登录用户仍显示无限画布入口', () => {
     localStorage.setItem(
       'auth-user',
       JSON.stringify({
         id: 2,
         username: 'member',
         role: 'user',
-        menuPerms: ['assets'],
+        menuPerms: [],
         status: 1,
       })
     )
