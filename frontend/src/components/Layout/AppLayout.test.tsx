@@ -217,6 +217,24 @@ describe('AppLayout', () => {
     expect(screen.getByText('用户管理')).toBeInTheDocument()
   })
 
+  it('具备 assets 权限但没有独立无限画布权限时，侧栏仍显示无限画布入口', () => {
+    localStorage.setItem(
+      'auth-user',
+      JSON.stringify({
+        id: 2,
+        username: 'member',
+        role: 'user',
+        menuPerms: ['assets'],
+        status: 1,
+      })
+    )
+
+    renderLayout()
+
+    const atelierLink = screen.getByRole('link', { name: '无限画布' })
+    expect(atelierLink).toHaveAttribute('href', '/infinite-atelier')
+  })
+
   it('具备 analytics 权限时侧栏显示数据统计入口', () => {
     localStorage.setItem(
       'auth-user',

@@ -19,7 +19,7 @@ import { useEffect, useState } from 'react'
 import { Link, useLocation, useNavigate } from 'react-router-dom'
 
 import { changePassword, logout as logoutApi } from '../../api/auth'
-import { isAdminOnlyRoute } from '../../router/permissions'
+import { isAdminOnlyRoute, routePermMap } from '../../router/permissions'
 import { useAuth } from '../../stores/auth'
 import { useBrand } from '../../stores/brand'
 import { resolveSystemName } from '../../utils/branding'
@@ -169,7 +169,7 @@ export const AppLayout = ({
 
   const menuItems = menuConfig
     .filter((item) => {
-      const hasPerm = Boolean(state.user?.menuPerms.includes(item.key))
+      const hasPerm = Boolean(state.user?.menuPerms.includes(routePermMap[item.path as keyof typeof routePermMap]))
       if (!hasPerm) {
         return false
       }
