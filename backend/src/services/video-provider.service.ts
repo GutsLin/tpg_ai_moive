@@ -203,6 +203,32 @@ export class VideoProviderService {
     return { endpoint, apiKey: globalApiKey }
   }
 
+  /** Resolve the current provider endpoint with the authenticated user's own key.
+   * This path intentionally never falls back to the platform-wide key.
+   */
+  public async getUserClientConfiguration(userId: number, providerKey?: string): Promise<{
+    providerKey: string
+    providerType: VideoProviderType
+    name: string
+    endpoint: string
+    apiKey: string
+  }> {
+    const provider = providerKey
+      ? await db.selectFrom('video_providers').selectAll().where('provider_key', '=', providerKey).where('enabled', '=', true).executeTakeFirst()
+      : await db.selectFrom('video_providers').selectAll().where('is_default', '=', true).where('enabled', '=', true).executeTakeFirst()
+    if (!provider) throw new ValidationAppError('尚未配置启用的图像生成平台')
+    const record = this.toRecord(provider)
+    const userKey = await this.userApiKeyService.getByUser(userId, record.providerKey)
+    if (!userKey) throw new ValidationAppError('当前用户尚未配置图像模型 API Key')
+    return {
+      providerKey: record.providerKey,
+      providerType: record.providerType,
+      name: record.name,
+      endpoint: normalizeEndpoint(record.endpoint),
+      apiKey: userKey.apiKey,
+    }
+  }
+
   public async create(input: {
     providerKey: string
     name: string
