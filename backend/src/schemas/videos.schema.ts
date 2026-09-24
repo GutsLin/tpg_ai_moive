@@ -96,3 +96,10 @@ export const analyticsVideosQuerySchema = z.object({
 export const exportAnalyticsVideosQuerySchema = analyticsVideosQuerySchema.extend({
   scope: z.enum(['current', 'all']).optional(),
 })
+
+export const exportVideoTaskDetailsQuerySchema = z.object({
+  dateFrom: z.string().datetime({ offset: true }),
+  dateTo: z.string().datetime({ offset: true }),
+  scope: z.enum(['current', 'all']).optional(),
+  mine: z.coerce.boolean().optional(),
+})

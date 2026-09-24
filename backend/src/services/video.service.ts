@@ -7,9 +7,12 @@ import { ConfigService } from './config.service'
 import type { OssServiceContract } from './oss.service'
 import { UserApiKeyService } from './user-api-key.service'
 import {
+  buildVideoTaskExportCsv,
   buildVideoExportCsv,
+  createVideoTaskExportFileName,
   createVideoExportFileNames,
   type VideoExportData,
+  type VideoTaskExportRow,
 } from './video-export.service'
 import { VideoGenerationLogger } from './video-generation-log.service'
 import { VideoProviderService, type VideoProviderSnapshot } from './video-provider.service'
@@ -173,11 +176,16 @@ export interface VideoExportQueryParams extends Omit<VideoAnalyticsQueryParams, 
   projectId?: number
 }
 
+export interface VideoTaskExportQueryParams extends Omit<VideoAnalyticsQueryParams, 'projectId' | 'model' | 'status'> {
+  projectId?: number
+}
+
 export interface VideoRepository {
   create(input: Omit<VideoRecord, 'id' | 'createdAt' | 'updatedAt'>): Promise<VideoRecord>
   list(params: VideoQueryParams): Promise<{ items: VideoRecord[]; total: number }>
   getAnalytics(params: VideoAnalyticsQueryParams): Promise<VideoAnalyticsResult>
   getExportData(params: VideoExportQueryParams): Promise<VideoExportData>
+  getTaskExportData(params: VideoTaskExportQueryParams): Promise<VideoTaskExportRow[]>
   findById(id: number, options?: { projectId?: number }): Promise<VideoRecord | null>
   update(id: number, patch: Partial<VideoRecord>): Promise<VideoRecord | null>
   claimDownload(taskId: number): Promise<string | null>
@@ -591,6 +599,51 @@ export class KyselyVideoRepository implements VideoRepository {
         totalTokensConsumed: normalizeDbNumber(row.total_tokens_consumed),
       })),
     }
+  }
+
+  public async getTaskExportData(params: VideoTaskExportQueryParams): Promise<VideoTaskExportRow[]> {
+    const conditions = [sql`1 = 1`]
+
+    if (params.projectId !== undefined) {
+      conditions.push(sql`vt.project_id = ${params.projectId}`)
+    }
+    if (params.mine) {
+      conditions.push(sql`vt.user_id = ${params.userId}`)
+    }
+    if (params.dateFrom) {
+      conditions.push(sql`vt.created_at >= ${new Date(params.dateFrom)}`)
+    }
+    if (params.dateTo) {
+      conditions.push(sql`vt.created_at <= ${new Date(params.dateTo)}`)
+    }
+
+    const whereClause = sql`where ${sql.join(conditions, sql` and `)}`
+    const result = await sql<{
+      user_name: string
+      created_at: Date | string
+      task_id: number | string
+      ark_task_id: string | null
+      model: string
+    }>`
+      select
+        u.username as user_name,
+        vt.created_at as created_at,
+        vt.id as task_id,
+        vt.ark_task_id as ark_task_id,
+        vt.model as model
+      from video_tasks vt
+      inner join users u on u.id = vt.user_id
+      ${whereClause}
+      order by vt.created_at asc, vt.id asc
+    `.execute(db)
+
+    return result.rows.map((row) => ({
+      userName: row.user_name,
+      createdAt: new Date(row.created_at),
+      taskId: normalizeDbNumber(row.task_id),
+      arkTaskId: row.ark_task_id,
+      model: row.model,
+    }))
   }
 
   public async update(id: number, patch: Partial<VideoRecord>): Promise<VideoRecord | null> {
@@ -1148,6 +1201,37 @@ export class VideoService {
 
     return {
       csv: buildVideoExportCsv(data),
+      fileName: fileNames.ascii,
+      utf8FileName: fileNames.utf8,
+    }
+  }
+
+  public async exportVideoTaskDetails(
+    context: {
+      userId: number
+      userRole: 'admin' | 'user'
+      projectId: number
+      projectRole: 'manager' | 'member' | 'viewer' | null
+    },
+    params: Omit<VideoTaskExportQueryParams, 'userId' | 'projectId'> & {
+      scope?: 'current' | 'all'
+    }
+  ) {
+    const { scope = 'current', ...filters } = params
+    if (scope === 'all' && context.userRole !== 'admin') {
+      throw new ForbiddenError('只有系统管理员可以导出全部项目数据')
+    }
+
+    const data = await this.repository.getTaskExportData({
+      ...filters,
+      mine: context.projectRole === 'member' ? true : filters.mine,
+      userId: context.userId,
+      projectId: scope === 'all' ? undefined : context.projectId,
+    })
+    const fileNames = createVideoTaskExportFileName(new Date())
+
+    return {
+      csv: buildVideoTaskExportCsv(data),
       fileName: fileNames.ascii,
       utf8FileName: fileNames.utf8,
     }

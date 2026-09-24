@@ -136,4 +136,33 @@ export class VideosController {
     ctx.set('Cache-Control', 'no-store')
     ctx.body = result.csv
   }
+
+  public exportTaskDetails = async (
+    ctx: Context,
+    query: {
+      dateFrom: string
+      dateTo: string
+      mine?: boolean
+      scope?: 'current' | 'all'
+    }
+  ) => {
+    const result = await this.videoService.exportVideoTaskDetails(
+      {
+        userId: Number(ctx.state.user?.sub),
+        userRole: ctx.state.user?.role ?? 'user',
+        projectId: Number(ctx.state.projectId),
+        projectRole: ctx.state.projectRole ?? null,
+      },
+      query
+    )
+
+    ctx.status = 200
+    ctx.set('Content-Type', 'text/csv; charset=utf-8')
+    ctx.set(
+      'Content-Disposition',
+      `attachment; filename="${result.fileName}"; filename*=UTF-8''${encodeURIComponent(result.utf8FileName)}`
+    )
+    ctx.set('Cache-Control', 'no-store')
+    ctx.body = result.csv
+  }
 }

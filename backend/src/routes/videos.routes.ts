@@ -14,6 +14,7 @@ import { UserApiKeyService } from '../services/user-api-key.service'
 import {
   analyticsVideosQuerySchema,
   createVideoSchema,
+  exportVideoTaskDetailsQuerySchema,
   exportAnalyticsVideosQuerySchema,
   listVideosQuerySchema,
 } from '../schemas/videos.schema'
@@ -64,6 +65,11 @@ export const createVideosRouter = (
   router.get('/analytics/export', async (ctx) => {
     const query = exportAnalyticsVideosQuerySchema.parse(ctx.request.query)
     await controller.exportAnalytics(ctx, query)
+  })
+
+  router.get('/analytics/task-details-export', async (ctx) => {
+    const query = exportVideoTaskDetailsQuerySchema.parse(ctx.request.query)
+    await controller.exportTaskDetails(ctx, query)
   })
 
   router.get('/:id', async (ctx) => {

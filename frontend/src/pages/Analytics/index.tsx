@@ -1,9 +1,10 @@
-import { DownloadOutlined, GlobalOutlined } from '@ant-design/icons'
+import { DownloadOutlined, FileTextOutlined, GlobalOutlined } from '@ant-design/icons'
 import { Alert, Button, DatePicker, Dropdown, Empty, Skeleton, Space, Typography, message } from 'antd'
 import { useEffect, useMemo, useState } from 'react'
 
 import {
   exportVideoAnalytics,
+  exportVideoTaskDetails,
   getVideoAnalytics,
   type VideoAnalyticsResponse,
   type VideoTaskStatus,
@@ -115,6 +116,7 @@ export const AnalyticsPage = () => {
   const [loading, setLoading] = useState(true)
   const [errorMessage, setErrorMessage] = useState<string | null>(null)
   const [exportingScope, setExportingScope] = useState<'current' | 'all' | null>(null)
+  const [exportingTaskDetails, setExportingTaskDetails] = useState(false)
   const [messageApi, contextHolder] = message.useMessage()
 
   useEffect(() => {
@@ -233,6 +235,53 @@ export const AnalyticsPage = () => {
     }
   }
 
+  const handleExportTaskDetails = async () => {
+    const effectiveFilters = canViewAll ? activeFilters : { ...activeFilters, mine: true }
+    const [dateFrom, dateTo] = effectiveFilters.dateRange ?? []
+    if (!dateFrom || !dateTo) {
+      void messageApi.warning('请先选择完整的时间范围，再导出用户任务明细')
+      return
+    }
+
+    setExportingTaskDetails(true)
+    try {
+      const blob = await exportVideoTaskDetails({
+        dateFrom: dateFrom.startOf('day').toISOString(),
+        dateTo: dateTo.endOf('day').toISOString(),
+        scope: canExportAllProjects ? 'all' : 'current',
+        mine: effectiveFilters.mine,
+      })
+      if (!(blob instanceof Blob) || blob.size === 0) {
+        throw new Error('导出文件为空')
+      }
+
+      const fileName = `Narrix用户任务明细_${dateFrom.format('YYYYMMDD')}-${dateTo.format('YYYYMMDD')}.csv`
+      const url = URL.createObjectURL(blob)
+      const anchor = document.createElement('a')
+      anchor.href = url
+      anchor.download = fileName
+      document.body.appendChild(anchor)
+      anchor.click()
+      anchor.remove()
+      URL.revokeObjectURL(url)
+      void messageApi.success('用户任务明细导出成功')
+    } catch (error: any) {
+      let exportError = error?.response?.data?.message ?? error?.message ?? '导出失败，请稍后重试'
+      if (error?.response?.data instanceof Blob) {
+        try {
+          const responseText = await error.response.data.text()
+          const responseBody = JSON.parse(responseText)
+          exportError = responseBody?.message ?? exportError
+        } catch {
+          // Keep the original request error when the response is not JSON.
+        }
+      }
+      void messageApi.error(exportError)
+    } finally {
+      setExportingTaskDetails(false)
+    }
+  }
+
   return (
     <Space orientation="vertical" size={20} style={{ width: '100%' }}>
       {contextHolder}
@@ -241,7 +290,7 @@ export const AnalyticsPage = () => {
         description="按当前项目汇总视频任务请求、成功率、Token 消耗和用户分布。统计口径与任务历史页保持一致。"
         actions={
           <Dropdown
-            disabled={exportingScope !== null}
+            disabled={exportingScope !== null || exportingTaskDetails}
             trigger={['click']}
             menu={{
               items: [
@@ -259,10 +308,16 @@ export const AnalyticsPage = () => {
                       onClick: () => void handleExport('all'),
                     }]
                   : []),
+                {
+                  key: 'task-details',
+                  label: '导出用户任务明细',
+                  icon: <FileTextOutlined />,
+                  onClick: () => void handleExportTaskDetails(),
+                },
               ],
             }}
           >
-            <Button aria-label="导出 CSV" icon={<DownloadOutlined />} loading={exportingScope !== null}>
+            <Button aria-label="导出 CSV" icon={<DownloadOutlined />} loading={exportingScope !== null || exportingTaskDetails}>
               导出 CSV
             </Button>
           </Dropdown>

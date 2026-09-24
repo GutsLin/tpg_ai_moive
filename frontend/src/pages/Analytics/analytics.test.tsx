@@ -8,6 +8,7 @@ import { AnalyticsPage } from '.'
 
 vi.mock('../../api/videos', () => ({
   exportVideoAnalytics: vi.fn(),
+  exportVideoTaskDetails: vi.fn(),
   getVideoAnalytics: vi.fn(),
 }))
 

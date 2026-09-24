@@ -218,6 +218,17 @@ export const exportVideoAnalytics = async (
   return response as unknown as Blob
 }
 
+export const exportVideoTaskDetails = async (
+  params: Pick<VideoAnalyticsQuery, 'dateFrom' | 'dateTo'> & { mine?: boolean; scope?: 'current' | 'all' }
+): Promise<Blob> => {
+  const response = await request.get<Blob>('/api/videos/analytics/task-details-export', {
+    params,
+    responseType: 'blob',
+  })
+
+  return response as unknown as Blob
+}
+
 export const createVideoTask = async (payload: CreateVideoTaskPayload): Promise<VideoTaskItem> => {
   const response = await request.post<VideoTaskItem>('/api/videos', payload)
   return response.data

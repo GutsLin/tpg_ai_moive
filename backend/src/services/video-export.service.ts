@@ -20,6 +20,14 @@ export interface VideoExportData {
   }>
 }
 
+export interface VideoTaskExportRow {
+  userName: string
+  createdAt: Date
+  taskId: number
+  arkTaskId: string | null
+  model: string
+}
+
 const neutralizeSpreadsheetFormula = (value: string): string =>
   /^[=+\-@\t\r]/.test(value) ? `'${value}` : value
 
@@ -134,6 +142,36 @@ export const buildVideoExportCsv = ({ models, projects, members }: VideoExportDa
   return `\uFEFF${lines.join('\r\n')}`
 }
 
+const formatShanghaiDateTime = (value: Date): string => {
+  const parts = new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'Asia/Shanghai',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    hour12: false,
+  }).formatToParts(value)
+  const get = (type: string) => parts.find((part) => part.type === type)?.value ?? ''
+  return `${get('year')}-${get('month')}-${get('day')} ${get('hour')}:${get('minute')}:${get('second')}`
+}
+
+export const buildVideoTaskExportCsv = (rows: VideoTaskExportRow[]): string => {
+  const lines: string[] = []
+  appendCsvRow(lines, ['用户名称', '时间', '任务ID', 'TaskId', '模型名称'])
+  for (const row of rows) {
+    appendCsvRow(lines, [
+      row.userName,
+      formatShanghaiDateTime(row.createdAt),
+      row.taskId,
+      row.arkTaskId,
+      row.model,
+    ])
+  }
+  return `\uFEFF${lines.join('\r\n')}`
+}
+
 export const createVideoExportFileNames = (
   date: Date,
   status?: string
@@ -147,5 +185,17 @@ export const createVideoExportFileNames = (
   return {
     ascii: `Narrix_${shanghaiDate}${statusTag}.csv`,
     utf8: `Narrix全项目统计_${shanghaiDate}${statusTag}.csv`,
+  }
+}
+
+export const createVideoTaskExportFileName = (date: Date): { ascii: string; utf8: string } => {
+  const shanghaiDate = new Date(date.getTime() + 8 * 60 * 60 * 1000)
+    .toISOString()
+    .slice(0, 10)
+    .replace(/-/g, '')
+
+  return {
+    ascii: `Narrix_tasks_${shanghaiDate}.csv`,
+    utf8: `Narrix用户任务明细_${shanghaiDate}.csv`,
   }
 }

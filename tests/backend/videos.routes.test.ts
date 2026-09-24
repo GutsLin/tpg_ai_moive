@@ -10,11 +10,13 @@ import type {
   VideoDispatcher,
   VideoDurationEstimate,
   VideoExportQueryParams,
+  VideoTaskExportQueryParams,
   VideoQueryParams,
   VideoRecord,
   VideoRepository,
   VideoTaskAssetReference,
 } from '../../backend/src/services/video.service'
+import type { VideoTaskExportRow } from '../../backend/src/services/video-export.service'
 import type {
   ProjectAccessRecord,
   ProjectAccessRepository,
@@ -26,6 +28,7 @@ class FakeVideoRepository implements VideoRepository {
   public readonly savedReferences = new Map<number, VideoTaskAssetReference[]>()
   public readonly updates: Array<{ id: number; patch: Partial<VideoRecord> }> = []
   public readonly exportCalls: VideoExportQueryParams[] = []
+  public readonly taskExportCalls: VideoTaskExportQueryParams[] = []
 
   public async claimDownload(): Promise<string | null> { return null }
   public async updateDownloadState(): Promise<VideoRecord | null> { return null }
@@ -282,6 +285,26 @@ class FakeVideoRepository implements VideoRepository {
         }))
         .sort((left, right) => byProjectName(left, right) || left.userName.localeCompare(right.userName, 'zh-CN')),
     }
+  }
+
+  public async getTaskExportData(params: VideoTaskExportQueryParams): Promise<VideoTaskExportRow[]> {
+    this.taskExportCalls.push(params)
+    let items = [...this.records.values()]
+    if (params.projectId !== undefined) items = items.filter((item) => item.projectId === params.projectId)
+    if (params.mine) items = items.filter((item) => item.userId === params.userId)
+    if (params.dateFrom) items = items.filter((item) => item.createdAt >= new Date(params.dateFrom!))
+    if (params.dateTo) items = items.filter((item) => item.createdAt <= new Date(params.dateTo!))
+
+    const userNameMap = new Map([[1, '管理员甲'], [2, '运营乙'], [9, '成员丙']])
+    return items
+      .sort((left, right) => left.createdAt.getTime() - right.createdAt.getTime() || left.id - right.id)
+      .map((item) => ({
+        userName: userNameMap.get(item.userId) ?? `用户${item.userId}`,
+        createdAt: item.createdAt,
+        taskId: item.id,
+        arkTaskId: item.arkTaskId,
+        model: item.model,
+      }))
   }
 
   public async update(id: number, patch: Partial<VideoRecord>): Promise<VideoRecord | null> {
@@ -1134,6 +1157,41 @@ describe('/api/videos', () => {
     expect(memberResponse.status).toBe(403)
     expect(memberResponse.body.message).toBe('只有系统管理员可以导出全部项目数据')
     expect(repository.exportCalls).toHaveLength(1)
+  })
+
+  it('任务明细导出按时间范围输出用户、任务和上游 TaskId', async () => {
+    const app = createApp({
+      videoRepository: repository,
+      videoDispatcher: dispatcher,
+      videoAssetReferenceResolver: assetReferenceResolver,
+      configStore: new FakeConfigStore(),
+      ossService,
+      projectAccessRepository,
+    })
+
+    const response = await request(app.callback())
+      .get('/api/videos/analytics/task-details-export')
+      .query({
+        dateFrom: '2026-04-04T00:00:00.000Z',
+        dateTo: '2026-04-05T23:59:59.999Z',
+        scope: 'all',
+      })
+      .set('Authorization', `Bearer ${signToken('admin', '1')}`)
+      .set('X-Project-Id', projectId)
+
+    expect(response.status).toBe(200)
+    expect(response.headers['content-type']).toContain('text/csv')
+    expect(response.text).toContain('用户名称,时间,任务ID,TaskId,模型名称')
+    expect(response.text).toContain('管理员甲')
+    expect(response.text).toContain('task-1')
+    expect(response.text).toContain('doubao-seedance-2-0-260128')
+    expect(repository.taskExportCalls).toEqual([{
+      userId: 1,
+      projectId: undefined,
+      dateFrom: '2026-04-04T00:00:00.000Z',
+      dateTo: '2026-04-05T23:59:59.999Z',
+      mine: undefined,
+    }])
   })
 
   it('analytics 对 member 强制收敛为本人任务', async () => {
