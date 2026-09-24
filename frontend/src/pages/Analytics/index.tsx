@@ -26,8 +26,11 @@ const panelStyle = {
 
 const modelOptions = [
   { label: '全部模型', value: '' },
-  { label: 'Seedance 2.0', value: 'doubao-seedance-2-0-260128' },
-  { label: 'Seedance 2.0 fast', value: 'doubao-seedance-2-0-fast-260128' },
+  { label: 'Seedance 2', value: 'seedance-2' },
+  { label: 'Seedance 2 fast', value: 'seedance-2-fast' },
+  { label: 'Seedance 2.5', value: 'seedance-2-5' },
+  { label: 'Seedance 2.0（历史）', value: 'doubao-seedance-2-0-260128' },
+  { label: 'Seedance 2.0 fast（历史）', value: 'doubao-seedance-2-0-fast-260128' },
 ]
 
 const statusOptions: Array<{ label: string; value: '' | VideoTaskStatus }> = [
