@@ -236,7 +236,8 @@ export const AnalyticsPage = () => {
   }
 
   const handleExportTaskDetails = async () => {
-    const effectiveFilters = canViewAll ? activeFilters : { ...activeFilters, mine: true }
+    // 明细导出使用当前控件中的时间范围，不要求用户先刷新汇总卡片。
+    const effectiveFilters = canViewAll ? draftFilters : { ...draftFilters, mine: true }
     const [dateFrom, dateTo] = effectiveFilters.dateRange ?? []
     if (!dateFrom || !dateTo) {
       void messageApi.warning('请先选择完整的时间范围，再导出用户任务明细')
@@ -255,6 +256,16 @@ export const AnalyticsPage = () => {
         throw new Error('导出文件为空')
       }
 
+      const csvText = await blob.text()
+      const dataRows = csvText
+        .replace(/^\uFEFF/, '')
+        .split(/\r?\n/)
+        .slice(1)
+        .filter((line) => line.trim().length > 0)
+      if (dataRows.length === 0) {
+        throw new Error('当前时间范围内没有可导出的任务数据')
+      }
+
       const fileName = `Narrix用户任务明细_${dateFrom.format('YYYYMMDD')}-${dateTo.format('YYYYMMDD')}.csv`
       const url = URL.createObjectURL(blob)
       const anchor = document.createElement('a')
@@ -263,7 +274,8 @@ export const AnalyticsPage = () => {
       document.body.appendChild(anchor)
       anchor.click()
       anchor.remove()
-      URL.revokeObjectURL(url)
+      // 大 CSV 在部分浏览器中会在 click 返回前才开始读取 Blob，延迟释放避免空文件。
+      window.setTimeout(() => URL.revokeObjectURL(url), 1000)
       void messageApi.success('用户任务明细导出成功')
     } catch (error: any) {
       let exportError = error?.response?.data?.message ?? error?.message ?? '导出失败，请稍后重试'
