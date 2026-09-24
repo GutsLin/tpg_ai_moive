@@ -39,7 +39,9 @@ const menuConfig = [
 
 // Temporarily keep the feature available by direct route while hiding its
 // navigation entry until the rollout is resumed.
-const INFINITE_ATELIER_NAV_ENABLED = true
+// Infinite Atelier is currently offline; keep the entry hidden until the
+// standalone service is intentionally re-enabled.
+const INFINITE_ATELIER_NAV_ENABLED = false
 
 const projectRoleTextMap = {
   manager: '项目管理员',

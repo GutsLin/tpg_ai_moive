@@ -217,10 +217,11 @@ describe('AppLayout', () => {
     expect(screen.getByText('用户管理')).toBeInTheDocument()
   })
 
-  it('系统管理员可以看到无限画布侧栏入口', async () => {
+  it('无限画布停服期间系统管理员也看不到侧栏入口', async () => {
     renderLayout()
 
-    expect(await screen.findByRole('button', { name: '无限画布' })).toBeInTheDocument()
+    await screen.findByText('素材管理')
+    expect(screen.queryByRole('button', { name: '无限画布' })).not.toBeInTheDocument()
   })
 
   it('普通用户看不到无限画布侧栏入口', async () => {
