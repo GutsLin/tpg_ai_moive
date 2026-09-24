@@ -1,6 +1,6 @@
 import { DownloadOutlined, FileTextOutlined, GlobalOutlined } from '@ant-design/icons'
 import { Alert, Button, DatePicker, Dropdown, Empty, Skeleton, Space, Typography, message } from 'antd'
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 
 import {
   exportVideoAnalytics,
@@ -110,9 +110,10 @@ const toRequestParams = (filters: AnalyticsFilters) => {
 }
 
 export const AnalyticsPage = () => {
-  const { state } = useAuth()
+  const { state, refreshSession } = useAuth()
   const canViewAll = state.user?.role === 'admin' || state.activeProjectRole === 'manager'
   const canExportAllProjects = state.user?.role === 'admin'
+  const activeProject = state.projects.find((project) => project.id === state.activeProjectId) ?? null
   const [draftFilters, setDraftFilters] = useState<AnalyticsFilters>(defaultFilters)
   const [activeFilters, setActiveFilters] = useState<AnalyticsFilters>(defaultFilters)
   const [data, setData] = useState<VideoAnalyticsResponse>(createEmptyAnalyticsData)
@@ -121,6 +122,29 @@ export const AnalyticsPage = () => {
   const [exportingScope, setExportingScope] = useState<'current' | 'all' | null>(null)
   const [exportingTaskDetails, setExportingTaskDetails] = useState(false)
   const [messageApi, contextHolder] = message.useMessage()
+  const sessionRefreshAttempted = useRef(false)
+
+  // A cached token can outlive the project cache (for example after a browser
+  // cache clear or a deployment). Restore the project context before treating
+  // the page as an empty result; the API requires X-Project-Id for analytics.
+  useEffect(() => {
+    if (
+      !state.hydrated ||
+      !state.token ||
+      !state.user ||
+      state.projectScoped ||
+      state.activeProjectId !== null ||
+      sessionRefreshAttempted.current
+    ) {
+      return
+    }
+
+    sessionRefreshAttempted.current = true
+    void refreshSession().catch(() => {
+      // The normal auth interceptor handles an expired token. Keep the page
+      // usable when a transient session refresh fails.
+    })
+  }, [refreshSession, state.activeProjectId, state.hydrated, state.projectScoped, state.token, state.user])
 
   useEffect(() => {
     if (!state.hydrated) {
@@ -536,7 +560,20 @@ export const AnalyticsPage = () => {
         </>
       ) : (
         <section style={panelStyle}>
-          <Empty description="当前筛选范围内暂无统计数据" />
+          <Empty
+            description={
+              <Space orientation="vertical" size={4}>
+                <Typography.Text>当前筛选范围内暂无统计数据</Typography.Text>
+                <Typography.Text type="secondary">
+                  项目：{activeProject?.name ?? '未选择项目'} · 范围：{canViewAll && !activeFilters.mine ? '全部任务' : '仅看我的'} ·
+                  模型：{activeFilters.model || '全部'} · 状态：{activeFilters.status ? statusLabelMap[activeFilters.status] : '全部'}
+                </Typography.Text>
+                {!activeProject ? (
+                  <Typography.Text type="warning">正在恢复项目上下文，请稍后点击“更新统计”。</Typography.Text>
+                ) : null}
+              </Space>
+            }
+          />
         </section>
       )}
     </Space>
