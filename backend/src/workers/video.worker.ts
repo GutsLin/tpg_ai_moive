@@ -1,6 +1,11 @@
 import 'dotenv/config'
 
+import { createWriteStream } from 'node:fs'
+import { mkdtemp, rm } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { PassThrough, Readable } from 'node:stream'
+import { pipeline } from 'node:stream/promises'
 import IORedis from 'ioredis'
 import { Queue, Worker, type Job } from 'bullmq'
 
@@ -571,6 +576,7 @@ const downloadVideoResult = async (
   const downloadUrls = resolveDownloadUrls(task.arkVideoUrl, task)
   let downloadUrl = downloadUrls[0] ?? task.arkVideoUrl
   let response: Response | null = null
+  let encounteredRecoverableCandidateFailure = false
   let responseAbortController: AbortController | null = null
   let cleanupResponseAbortRelay: (() => void) | null = null
   const totalAbortController = new AbortController()
@@ -649,6 +655,7 @@ const downloadVideoResult = async (
         keepAttemptController = response.ok
       } catch (error) {
         if (nextDownloadUrl && !totalAbortController.signal.aborted && isRecoverableDownloadError(error)) {
+          encounteredRecoverableCandidateFailure = true
           await writeDownloadFallbackLog(task, generationLogger, downloadUrl, nextDownloadUrl, { error })
           continue
         }
@@ -665,6 +672,7 @@ const downloadVideoResult = async (
       if (!response.ok) {
         const errorMessage = buildArkVideoDownloadFailedMessage(response.status, task.arkTaskId, getProviderLabel(task))
         if (nextDownloadUrl && !totalAbortController.signal.aborted && isRecoverableDownloadStatus(response.status)) {
+          encounteredRecoverableCandidateFailure = true
           if (response.body) {
             await response.body.cancel().catch(() => undefined)
           }
@@ -674,6 +682,13 @@ const downloadVideoResult = async (
         }
 
         if (response.status === 404 || response.status === 403) {
+          // A terminal response from a fallback URL must not override a transient failure
+          // from the canonical file URL. The canonical URL can recover on a later retry.
+          if (encounteredRecoverableCandidateFailure) {
+            await scheduleDownloadRetry(errorMessage)
+            return
+          }
+
           await updateDownloadState(task, repository, generationLogger, claimToken, 'video_task.download_failed', '结果视频下载失败', {
             status: 'failed',
             errorMessage,
@@ -701,10 +716,62 @@ const downloadVideoResult = async (
     }
 
     const contentType = response.headers.get('content-type') ?? 'video/mp4'
+    const rawContentLength = response.headers.get('content-length')
+    const parsedContentLength = rawContentLength ? Number(rawContentLength) : Number.NaN
+    const contentLength = Number.isSafeInteger(parsedContentLength) && parsedContentLength > 0
+      ? parsedContentLength
+      : undefined
     const ossKey = resolveVideoOssKey(task)
     let uploadStarted = false
     try {
-      if (!response.body || !ossService.putObjectStream) {
+      if (response.body && ossService.putObjectFile) {
+        const tempDirectory = await mkdtemp(join(tmpdir(), 'narrix-video-'))
+        const tempFilePath = join(tempDirectory, 'result.mp4')
+        try {
+          const source = Readable.fromWeb(response.body as never)
+          const destination = createWriteStream(tempFilePath)
+          let idleTimer: NodeJS.Timeout | undefined
+          const stopDownload = (reason?: unknown) => {
+            const error = reason instanceof Error ? reason : new Error('视频下载流已中止')
+            if (!source.destroyed) source.destroy(error)
+            if (!destination.destroyed) destination.destroy(error)
+          }
+          const onAbort = () => stopDownload(responseAbortController!.signal.reason)
+          const resetIdleTimer = () => {
+            if (idleTimer) clearTimeout(idleTimer)
+            idleTimer = setTimeout(() => {
+              responseAbortController!.abort(new Error('视频下载空闲超时'))
+            }, VIDEO_DOWNLOAD_IDLE_TIMEOUT_MS)
+            idleTimer.unref?.()
+          }
+          responseAbortController.signal.addEventListener('abort', onAbort, { once: true })
+          source.on('data', resetIdleTimer)
+          resetIdleTimer()
+          try {
+            await pipeline(source, destination)
+          } finally {
+            if (idleTimer) clearTimeout(idleTimer)
+            responseAbortController.signal.removeEventListener('abort', onAbort)
+          }
+
+          await generationLogger.step(
+            {
+              ...toLogContext(task),
+              stage: 'oss_upload',
+              action: 'video_result.upload_oss',
+              message: '分片上传结果视频到 OSS',
+              requestPayload: { ossKey, contentType, contentLength },
+              responsePayload: () => ({ ossKey, contentType, contentLength }),
+            },
+            async () => {
+              uploadStarted = true
+              return ossService.putObjectFile!(ossKey, tempFilePath, contentType)
+            }
+          )
+        } finally {
+          await rm(tempDirectory, { recursive: true, force: true })
+        }
+      } else if (!response.body || !ossService.putObjectStream) {
         const buffer = Buffer.from(await response.arrayBuffer())
         await generationLogger.step(
           {
@@ -752,12 +819,12 @@ const downloadVideoResult = async (
               stage: 'oss_upload',
               action: 'video_result.upload_oss',
               message: '流式上传结果视频到 OSS',
-              requestPayload: { ossKey, contentType },
-              responsePayload: () => ({ ossKey, contentType }),
+              requestPayload: { ossKey, contentType, contentLength },
+              responsePayload: () => ({ ossKey, contentType, contentLength }),
             },
             async () => {
               uploadStarted = true
-              return ossService.putObjectStream!(ossKey, uploadStream, contentType)
+              return ossService.putObjectStream!(ossKey, uploadStream, contentType, contentLength)
             }
           )
         } finally {

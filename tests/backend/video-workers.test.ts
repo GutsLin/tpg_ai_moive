@@ -2385,6 +2385,38 @@ describe('video.worker', () => {
     })
   })
 
+  it('download processor 直连暂时失败且代理返回 404 时保留任务重试', async () => {
+    const fetchImpl = vi
+      .fn()
+      .mockRejectedValueOnce(new Error('socket hang up'))
+      .mockResolvedValueOnce(new Response(null, { status: 404 }))
+    seedToapisDownloadTask(30, 'https://files.toapis.cn/videos/task-toapis-30/retry.mp4')
+    const now = new Date('2026-09-30T09:30:00.000Z')
+
+    await createVideoDownloadProcessor({
+      repository,
+      ossService,
+      fetchImpl,
+      now: () => now,
+    })({ taskId: 30 })
+
+    expect(fetchImpl).toHaveBeenCalledTimes(2)
+    expect(repository.updates).toContainEqual({
+      id: 30,
+      patch: expect.objectContaining({
+        status: 'processing',
+        errorMessage: expect.stringContaining('等待重试'),
+        downloadClaimedAt: null,
+        downloadClaimToken: null,
+        nextPollAt: expect.any(Date),
+      }),
+    })
+    expect(repository.updates).not.toContainEqual({
+      id: 30,
+      patch: expect.objectContaining({ status: 'failed' }),
+    })
+  })
+
   it('download processor 直连返回 403 或 404 时不回退代理', async () => {
     for (const [id, status] of [[28, 403], [29, 404]] as const) {
       const fetchImpl = vi.fn().mockResolvedValue(new Response(null, { status }))
@@ -2532,17 +2564,18 @@ describe('video.worker', () => {
     expect((await repository.findById(24))?.status).toBe('succeeded')
   })
 
-  it('download processor 将响应流直接传给 OSS 上传', async () => {
+  it('download processor 将响应流写入临时文件后分片上传并清理文件', async () => {
     const streamedChunks: Buffer[] = []
+    let uploadedTempFilePath: string | undefined
     const streamingOssService = {
       async getSignedUrl() { return 'https://signed.example.com/video.mp4' },
       async deleteObject() {},
       async putObject() { throw new Error('不应走 Buffer 上传') },
-      async putObjectStream(_ossKey: string, data: NodeJS.ReadableStream) {
-        for await (const chunk of data) {
-          streamedChunks.push(Buffer.from(chunk))
-        }
+      async putObjectFile(_ossKey: string, filePath: string) {
+        uploadedTempFilePath = filePath
+        streamedChunks.push(await (await import('node:fs/promises')).readFile(filePath))
       },
+      async putObjectStream() { throw new Error('不应走 putStream 上传') },
       async getStsCredentials() {
         return {
           credentials: { accessKeyId: 'sts-ak', accessKeySecret: 'sts-sk', securityToken: 'sts-token', expiration: '2026-04-04T12:00:00.000Z' },
@@ -2554,7 +2587,7 @@ describe('video.worker', () => {
     } satisfies OssServiceContract
     const fetchImpl = vi.fn().mockResolvedValue(new Response(Buffer.from('streamed-video'), {
       status: 200,
-      headers: { 'content-type': 'video/mp4' },
+      headers: { 'content-type': 'video/mp4', 'content-length': '14' },
     }))
 
     repository.seed([
@@ -2593,6 +2626,8 @@ describe('video.worker', () => {
     })({ taskId: 23 })
 
     expect(Buffer.concat(streamedChunks).toString()).toBe('streamed-video')
+    expect(uploadedTempFilePath).toBeTruthy()
+    await expect((await import('node:fs/promises')).access(uploadedTempFilePath!)).rejects.toMatchObject({ code: 'ENOENT' })
     expect(repository.updates).toContainEqual({
       id: 23,
       patch: expect.objectContaining({ status: 'succeeded', videoOssKey: 'videos/task-streamed.mp4' }),

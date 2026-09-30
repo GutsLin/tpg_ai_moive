@@ -26,12 +26,15 @@ export interface OssServiceContract {
   getStsCredentials(): Promise<OssStsResponse>
   deleteObject(ossKey: string): Promise<void>
   putObject(ossKey: string, data: Buffer, contentType?: string): Promise<void>
-  putObjectStream?(ossKey: string, data: Readable, contentType?: string): Promise<void>
+  putObjectFile?(ossKey: string, filePath: string, contentType?: string): Promise<void>
+  putObjectStream?(ossKey: string, data: Readable, contentType?: string, contentLength?: number): Promise<void>
 }
 
 const SERVER_OSS_TIMEOUT_MS = 300_000
 const SERVER_OSS_STREAM_TIMEOUT_MS = 20 * 60_000
 const SERVER_OSS_RETRY_MAX = 3
+const SERVER_OSS_MULTIPART_PART_SIZE = 5 * 1024 * 1024
+const SERVER_OSS_MULTIPART_PARALLEL = 2
 const SERVER_OSS_INTERNAL_CONFIG_KEY = 'oss_server_internal_enabled'
 
 export class OssService implements OssServiceContract {
@@ -85,10 +88,23 @@ export class OssService implements OssServiceContract {
     await client.put(ossKey, data, contentType ? { headers: { 'Content-Type': contentType } } : undefined)
   }
 
-  public async putObjectStream(ossKey: string, data: Readable, contentType?: string): Promise<void> {
+  public async putObjectFile(ossKey: string, filePath: string, contentType?: string): Promise<void> {
     const client = await this.createClient({ serverOperation: true, timeoutMs: SERVER_OSS_STREAM_TIMEOUT_MS })
 
-    await (client as any).putStream(ossKey, data, contentType ? { headers: { 'Content-Type': contentType } } : undefined)
+    await client.multipartUpload(ossKey, filePath, {
+      parallel: SERVER_OSS_MULTIPART_PARALLEL,
+      partSize: SERVER_OSS_MULTIPART_PART_SIZE,
+      ...(contentType ? { mime: contentType } : {}),
+    })
+  }
+
+  public async putObjectStream(ossKey: string, data: Readable, contentType?: string, contentLength?: number): Promise<void> {
+    const client = await this.createClient({ serverOperation: true, timeoutMs: SERVER_OSS_STREAM_TIMEOUT_MS })
+
+    await (client as any).putStream(ossKey, data, {
+      ...(contentType ? { headers: { 'Content-Type': contentType } } : {}),
+      ...(contentLength ? { contentLength } : {}),
+    })
   }
 
   public async getStsCredentials(): Promise<OssStsResponse> {

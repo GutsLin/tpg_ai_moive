@@ -8,6 +8,7 @@ const ossConstructorCalls: any[] = []
 const ossInstances: Array<{
   signatureUrl: ReturnType<typeof vi.fn>
   put: ReturnType<typeof vi.fn>
+  multipartUpload: ReturnType<typeof vi.fn>
   putStream: ReturnType<typeof vi.fn>
   delete: ReturnType<typeof vi.fn>
 }> = []
@@ -18,6 +19,7 @@ vi.mock('ali-oss', () => ({
     const instance = {
       signatureUrl: vi.fn().mockReturnValue('https://public.example.com/signed'),
       put: vi.fn().mockResolvedValue({}),
+      multipartUpload: vi.fn().mockResolvedValue({}),
       putStream: vi.fn().mockResolvedValue({}),
       delete: vi.fn().mockResolvedValue({}),
     }
@@ -136,7 +138,7 @@ describe('OssService', () => {
     const service = createService()
     const stream = Readable.from([Buffer.from('video')])
 
-    await service.putObjectStream('videos/streamed.mp4', stream, 'video/mp4')
+    await service.putObjectStream('videos/streamed.mp4', stream, 'video/mp4', 5)
 
     expect(ossConstructorCalls[0]).toMatchObject({
       timeout: 20 * 60_000,
@@ -144,6 +146,24 @@ describe('OssService', () => {
     })
     expect(ossInstances[0].putStream).toHaveBeenCalledWith('videos/streamed.mp4', stream, {
       headers: { 'Content-Type': 'video/mp4' },
+      contentLength: 5,
+    })
+  })
+
+  it('文件上传使用分片上传，限制并发并设置内容类型', async () => {
+    const service = createService(true)
+
+    await service.putObjectFile('videos/multipart.mp4', '/tmp/multipart.mp4', 'video/mp4')
+
+    expect(ossConstructorCalls[0]).toMatchObject({
+      internal: true,
+      timeout: 20 * 60_000,
+      retryMax: 3,
+    })
+    expect(ossInstances[0].multipartUpload).toHaveBeenCalledWith('videos/multipart.mp4', '/tmp/multipart.mp4', {
+      parallel: 2,
+      partSize: 5 * 1024 * 1024,
+      mime: 'video/mp4',
     })
   })
 })
